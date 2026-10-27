@@ -1,3 +1,4 @@
+print("START OF MAIN", flush=True)
 """
 main.py – Point d'entrée de CamSync.
 
@@ -13,13 +14,14 @@ import sys
 import time
 import traceback
 
+print("reconfigure")
 # Force UTF-8 pour stdout/stderr (évite les crashes en console cp1252 / PowerShell)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-
+print("excepthook")
 def _excepthook(exc_type, exc_value, exc_tb):
     """Affiche les exceptions non capturées (slots Qt) au lieu de tuer
     silencieusement l'application."""
@@ -57,10 +59,13 @@ if _NDI_SRC:
     if _NDI_SRC not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _NDI_SRC + os.pathsep + os.environ.get("PATH", "")
 
-from PyQt5.QtWidgets import QApplication
-
+print("import NDI")
 from ndi_camera_stream import NdiCameraStream
+print("import PyQt5")
+from PyQt5.QtWidgets import QApplication
+print("import rtp")
 from rtp_camera_stream import RtpCameraStream
+print("import configs")
 from config import (
     CAMERAS,
     INSTA_DECODER,
@@ -73,12 +78,15 @@ from config import (
     SYNC_BUFFER_SEC,
     TARGET_FPS,
 )
+
+print("import gui, ntpclock, aligners, metrics")
 from gui import MainWindow
 from ntp_clock import NTPClock
 from stream_aligner import StreamAligner
 from dynamic_aligner import DynamicAligner
 from sync_metrics import SyncMetricsEngine
 
+print("START OF MAIN", flush=True)
 
 def main():
     # ── 0. QApplication DOIT être créée en premier (avant tout thread OpenCV)
@@ -241,5 +249,10 @@ def main():
     sys.exit(exit_code)
 
 
+print("A", flush=True)
+
 if __name__ == "__main__":
+    print("B", flush=True)
     main()
+
+print("C", flush=True)

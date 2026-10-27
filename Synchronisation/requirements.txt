@@ -1,0 +1,8 @@
+pyqt5
+numpy
+ndlib
+ndi-python
+av
+opencv-python
+pyqtgraph
+ntplib
