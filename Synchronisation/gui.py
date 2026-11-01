@@ -26,7 +26,6 @@ from fractions import Fraction
 from collections import deque
 import pyqtgraph as pg
 
-import av
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
@@ -385,29 +384,23 @@ class RecordingWorker(threading.Thread):
         self.dropped = 0   # snapshots droppés (queue pleine)
 
     def _init_cam_writer(self, cam, tf,
-                         containers: dict, streams: dict,
+                         yuv_files: dict, frame_sizes: dict,
                          csv_files: dict, frame_idx: dict) -> None:
-        """Initialise le container MKV + stream MJPEG + CSV pour une caméra.
+        """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
 
         Extrait du run() pour permettre l'initialisation tardive d'une caméra
         qui n'avait pas encore de frame au premier snapshot.
+        Les dimensions doivent être paires (requis par YUV420 / TMIV).
         """
         path = self._rec_paths.get(cam.camera_id)
         if not path:
             return
         h, w = tf.frame.shape[:2]
 
-        # Matroska (.mkv) : streaming-friendly, VFR natif.
-        container = av.open(str(path), mode='w', format='matroska')
-        stream = container.add_stream('mjpeg', rate=30)
-        stream.width   = w
-        stream.height  = h
-        stream.pix_fmt = 'yuvj420p'
-        stream.time_base = Fraction(1, 1000)
-        stream.codec_context.time_base = Fraction(1, 1000)
-        containers[cam.camera_id] = container
-        streams[cam.camera_id]    = stream
-        frame_idx[cam.camera_id]  = 0
+        # Fichier binaire brut : chaque frame = Y(w×h) + U(w/2×h/2) + V(w/2×h/2)
+        yuv_files[cam.camera_id]   = open(str(path), 'wb')
+        frame_sizes[cam.camera_id] = (w, h)
+        frame_idx[cam.camera_id]   = 0
 
         csv_path = self._csv_paths.get(cam.camera_id)
         if csv_path:
@@ -416,10 +409,10 @@ class RecordingWorker(threading.Thread):
             csv_files[cam.camera_id] = f
 
     def run(self):
-        containers: dict = {}   # camera_id → av.OutputContainer
-        streams:    dict = {}   # camera_id → av.VideoStream
-        csv_files:  dict = {}   # camera_id → file handle
-        frame_idx:  dict = {}   # camera_id → int
+        yuv_files:   dict = {}   # camera_id → file handle (binaire brut I420)
+        frame_sizes: dict = {}   # camera_id → (width, height)
+        csv_files:   dict = {}   # camera_id → file handle
+        frame_idx:   dict = {}   # camera_id → int
         start_ntp: float | None = None
 
         # Pool d'encodage persistant : évite l'overhead de spawn/teardown
@@ -451,24 +444,20 @@ class RecordingWorker(threading.Thread):
                             )
                             continue
                         self._init_cam_writer(
-                            cam, tf, containers, streams, csv_files, frame_idx
+                            cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         )
-
-                # ── PTS en ms relatifs au début de l'enregistrement ────
-                pts_ms = int((snapshot.reference_ntp - start_ntp) * 1000.0)
-                pts_ms = max(pts_ms, 0)
 
                 # ── Initialisation tardive des caméras manquantes ───────
                 # (au cas où la caméra n'avait pas encore de frame au premier
                 # snapshot, elle est ajoutée dès qu'une frame est disponible).
                 for cam in self._cameras:
-                    if cam.camera_id in containers:
+                    if cam.camera_id in yuv_files:
                         continue
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or tf.frame is None:
                         continue
                     self._init_cam_writer(
-                        cam, tf, containers, streams, csv_files, frame_idx
+                        cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                     )
                     print(
                         f"[RecordingWorker] Caméra {cam.name} initialisée "
@@ -478,40 +467,25 @@ class RecordingWorker(threading.Thread):
 
                 t_write_start = time.monotonic()
 
-                # ── Encodage des 4 caméras en parallèle ───────────────
-                # cv2.imencode libère le GIL → exécution C réellement parallèle
-                # sur plusieurs cœurs. Les 4 threads s'exécutent simultanément,
-                # latence totale ≈ max(cam1..4) ≈ 5-20 ms au lieu de 100+ ms.
+                # ── Conversion YUV420p (I420) et écriture brute ───────
+                # cv2.cvtColor libère le GIL → conversion C réellement parallèle.
+                # Chaque frame BGR→I420 : ~2-5 ms/cam, écriture I/O directe.
+                # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
                 def _encode_cam(cam):
                     tf = snapshot.frames.get(cam.camera_id)
-                    if tf is None or cam.camera_id not in containers:
+                    if tf is None or cam.camera_id not in yuv_files:
                         return
-                    stream    = streams[cam.camera_id]
-                    container = containers[cam.camera_id]
+                    yuv_file = yuv_files[cam.camera_id]
 
-                    # Encodage JPEG via OpenCV (bypass pipeline PyAV MJPEG)
-                    ok, jpeg_buf = cv2.imencode(
-                        '.jpg', tf.frame,
-                        [cv2.IMWRITE_JPEG_QUALITY, 85]
-                    )
-                    if not ok:
-                        return
+                    # Conversion BGR → YUV420p planar I420 (non compressé)
+                    # Les dimensions doivent être paires (requis par YUV420).
+                    yuv = cv2.cvtColor(tf.frame, cv2.COLOR_BGR2YUV_I420)
+                    yuv_file.write(yuv.tobytes())
 
-                    # Injection directe des bytes JPEG comme packet MKV
-                    packet           = av.Packet(jpeg_buf)
-                    packet.pts       = pts_ms
-                    packet.dts       = pts_ms
-                    packet.time_base = Fraction(1, 1000)
-                    packet.stream    = stream
-                    try:
-                        container.mux(packet)
-                    except Exception as _mux_err:
-                        print(f"[RecordingWorker] Erreur mux {cam.camera_id}: "
-                              f"{_mux_err}", flush=True)
-
-                    idx       = frame_idx[cam.camera_id]
-                    mean_luma = float(tf.frame[..., 1].mean())
-                    csv_f     = csv_files.get(cam.camera_id)
+                    idx        = frame_idx[cam.camera_id]
+                    h_frame    = tf.frame.shape[0]
+                    mean_luma  = float(yuv[:h_frame].mean())  # plan Y uniquement
+                    csv_f      = csv_files.get(cam.camera_id)
                     if csv_f:
                         csv_f.write(f"{idx},{tf.ntp_timestamp:.6f},{mean_luma:.2f}\n")
                     frame_idx[cam.camera_id] = idx + 1
@@ -528,21 +502,16 @@ class RecordingWorker(threading.Thread):
                           f"{write_ms:.0f} ms", flush=True)
 
         finally:
-            # ── Flush encodeurs + fermeture propre des containers ───────
-            for cam_id, container in containers.items():
-                stream = streams.get(cam_id)
-                if stream:
-                    try:
-                        # MJPEG raw-mux : pas d'état encodeur à flusher.
-                        # L'appel stream.encode() est un no-op ici.
-                        for packet in stream.encode():
-                            container.mux(packet)
-                    except Exception:
-                        pass  # normal pour un stream MJPEG raw-mux
+            # ── Fermeture des fichiers YUV bruts ────────────────────────
+            for cam_id, yuv_f in yuv_files.items():
                 try:
-                    container.close()
+                    yuv_f.flush()
+                    yuv_f.close()
                 except Exception as e:
-                    print(f"[RecordingWorker] Close {cam_id}: {e}", flush=True)
+                    print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
+
+            # ── Écriture du JSON de métadonnées TMIV ───────────────────
+            self._write_tmiv_metadata(frame_sizes, frame_idx)
 
             for f in csv_files.values():
                 try:
@@ -565,6 +534,64 @@ class RecordingWorker(threading.Thread):
 
             print(f"[RecordingWorker] Done — {self.written} snapshots written, "
                   f"{self.dropped} dropped.", flush=True)
+
+    def _write_tmiv_metadata(self, frame_sizes: dict, frame_idx: dict,
+                              fps: float = 30.0) -> None:
+        """Écrit le fichier JSON de métadonnées au format TMIV (ISO/IEC 23090-12).
+
+        TMIV attend :
+          - Des fichiers YUV420p raw I420 non compressés, un par caméra.
+          - Un JSON décrivant la séquence : résolution, fps, nb frames,
+            paramètres de projection/pose de chaque caméra.
+
+        La structure est conforme au schéma TMIV v4 (CTC).
+        Les champs Position/Rotation doivent être complétés avec les
+        résultats de calibration (Calibration/).
+        """
+        if not self._rec_paths or not frame_sizes:
+            return
+        import json as _json
+        first_path = next(iter(self._rec_paths.values()), None)
+        if first_path is None:
+            return
+        out_dir   = os.path.dirname(first_path)
+        meta_path = os.path.join(out_dir, "tmiv_metadata.json")
+
+        n_frames = max(frame_idx.values()) if frame_idx else self.written
+
+        cameras_meta = []
+        for cam in self._cameras:
+            cid  = cam.camera_id
+            w, h = frame_sizes.get(cid, (0, 0))
+            cameras_meta.append({
+                "Name":            cam.name,
+                "BitDepthColor":   8,
+                "ColorSpace":      "YUV420",
+                "Resolution":      [w, h],
+                "Projection":      "Perspective",
+                "Position":        [0.0, 0.0, 0.0],
+                "Rotation":        [0.0, 0.0, 0.0],
+                "Depth_range":     [0.1, 1000.0],
+                "BitDepthDepth":   16,
+                "DepthColorSpace": "YUV420",
+                "yuv_file":        os.path.basename(
+                    self._rec_paths.get(cid, "")),
+            })
+
+        metadata = {
+            "Version":        "4.0",
+            "Content_name":   os.path.basename(out_dir),
+            "Fps":            fps,
+            "NumberOfFrames": n_frames,
+            "cameras":        cameras_meta,
+        }
+        try:
+            with open(meta_path, 'w', encoding='utf-8') as mf:
+                _json.dump(metadata, mf, indent=2)
+            print(f"[RecordingWorker] TMIV metadata → {meta_path}", flush=True)
+        except Exception as e:
+            print(f"[RecordingWorker] Erreur écriture metadata TMIV : {e}",
+                  flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1621,14 +1648,14 @@ class MainWindow(QMainWindow):
             self._lbl_rec_elapsed.setVisible(True)
             self.setWindowTitle(
                 f"Cam_Synchro \u2014 \u23fa REC")
-            print("[CamSync] Recording format: MKV (MJPEG) via PyAV — VFR",
+            print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
                   flush=True)
             rec_paths: dict[str, str] = {}
             csv_paths: dict[str, str] = {}
             for cam in self.runtime.streams:
                 safe_name = cam.name.replace(" ", "_").replace("/", "_").replace("#", "N")
                 rec_paths[cam.camera_id] = os.path.join(
-                    self._record_dir, f"{safe_name}.mkv")
+                    self._record_dir, f"{safe_name}.yuv")
                 csv_paths[cam.camera_id] = os.path.join(
                     self._record_dir, f"{safe_name}.csv")
 
