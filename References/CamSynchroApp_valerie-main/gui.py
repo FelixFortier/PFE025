@@ -349,10 +349,10 @@ class RecordingWorker(threading.Thread):
     """Thread d'enregistrement découplé du GUI.
 
     Consomme des AlignedSnapshot depuis une queue bornée (maxsize=8) et écrit
-    les frames dans des fichiers MKV (MJPEG) via PyAV avec timestamps PTS réels.
+    les frames dans des fichiers MKV H.264 via PyAV avec timestamps PTS réels.
 
     Architecture :
-        StreamAligner → Queue(maxsize=8) → RecordingWorker → PyAV MP4
+        StreamAligner → Queue(maxsize=8) → RecordingWorker → MKV H.264
         GUI           → preview only (aucun enregistrement dans _refresh_video)
 
     NOTE: Les frames sont intentionnellement copiées avant le push dans la
@@ -382,24 +382,34 @@ class RecordingWorker(threading.Thread):
     def _init_cam_writer(self, cam, tf,
                          containers: dict, streams: dict,
                          csv_files: dict, frame_idx: dict) -> None:
-        """Initialise le container MKV + stream MJPEG + CSV pour une caméra.
+        """Initialise le container MKV + stream H.264 + CSV pour une caméra.
 
         Extrait du run() pour permettre l'initialisation tardive d'une caméra
         qui n'avait pas encore de frame au premier snapshot.
+
+        L'export H.264 dans un conteneur Matroska est compatible avec les
+        pipelines d'import TMIV, contrairement au MJPEG raw qui n'est pas le
+        format standard attendu en traitement immersive.
         """
         path = self._rec_paths.get(cam.camera_id)
         if not path:
             return
         h, w = tf.frame.shape[:2]
 
-        # Matroska (.mkv) : streaming-friendly, VFR natif.
+        # Matroska (.mkv) : format standard, largement supporté par TMIV.
+        # On privilégie libx264, mais on retombe sur un codec H.264 générique
+        # si la build FFmpeg de l'environnement ne dispose pas de libx264.
         container = av.open(str(path), mode='w', format='matroska')
-        stream = container.add_stream('mjpeg', rate=30)
+        codec_name = 'libx264' if 'libx264' in av.codecs() else 'h264'
+        if codec_name == 'h264' and 'h264' not in av.codecs():
+            codec_name = 'mpeg4'
+        stream = container.add_stream(codec_name, rate=30)
         stream.width   = w
         stream.height  = h
-        stream.pix_fmt = 'yuvj420p'
+        stream.pix_fmt = 'yuv420p'
         stream.time_base = Fraction(1, 1000)
         stream.codec_context.time_base = Fraction(1, 1000)
+        stream.codec_context.options = {'preset': 'veryfast', 'crf': '23'}
         containers[cam.camera_id] = container
         streams[cam.camera_id]    = stream
         frame_idx[cam.camera_id]  = 0
@@ -481,32 +491,40 @@ class RecordingWorker(threading.Thread):
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or cam.camera_id not in containers:
                         return
-                    stream    = streams[cam.camera_id]
+                    stream = streams[cam.camera_id]
                     container = containers[cam.camera_id]
 
-                    # Encodage JPEG via OpenCV (bypass pipeline PyAV MJPEG)
-                    ok, jpeg_buf = cv2.imencode(
-                        '.jpg', tf.frame,
-                        [cv2.IMWRITE_JPEG_QUALITY, 85]
-                    )
-                    if not ok:
-                        return
+                    # Encodage H.264 de la frame courante. Le flux est ensuite
+                    # muxé dans un MKV standard, ce qui est l'export attendu par
+                    # TMIV pour l'import dans une chaîne d'acquisition immersive.
+                    frame_bgr = tf.frame
+                    if frame_bgr.dtype != np.uint8:
+                        frame_bgr = frame_bgr.astype(np.uint8)
+                    if frame_bgr.ndim == 3 and frame_bgr.shape[2] == 4:
+                        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_BGRA2BGR)
+                    elif frame_bgr.ndim == 3 and frame_bgr.shape[2] == 1:
+                        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_GRAY2BGR)
 
-                    # Injection directe des bytes JPEG comme packet MKV
-                    packet           = av.Packet(jpeg_buf)
-                    packet.pts       = pts_ms
-                    packet.dts       = pts_ms
-                    packet.time_base = Fraction(1, 1000)
-                    packet.stream    = stream
+                    rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    av_frame = av.VideoFrame.from_ndarray(rgb_frame, format='rgb24')
+                    av_frame = av_frame.reformat(format='yuv420p')
+                    av_frame.pts = pts_ms
+                    av_frame.time_base = Fraction(1, 1000)
+
                     try:
-                        container.mux(packet)
+                        for encoded_packet in stream.encode(av_frame):
+                            encoded_packet.pts = pts_ms
+                            encoded_packet.dts = pts_ms
+                            encoded_packet.time_base = Fraction(1, 1000)
+                            encoded_packet.stream = stream
+                            container.mux(encoded_packet)
                     except Exception as _mux_err:
-                        print(f"[RecordingWorker] Erreur mux {cam.camera_id}: "
+                        print(f"[RecordingWorker] Erreur encode/mux {cam.camera_id}: "
                               f"{_mux_err}", flush=True)
 
-                    idx       = frame_idx[cam.camera_id]
+                    idx = frame_idx[cam.camera_id]
                     mean_luma = float(tf.frame[..., 1].mean())
-                    csv_f     = csv_files.get(cam.camera_id)
+                    csv_f = csv_files.get(cam.camera_id)
                     if csv_f:
                         csv_f.write(f"{idx},{tf.ntp_timestamp:.6f},{mean_luma:.2f}\n")
                     frame_idx[cam.camera_id] = idx + 1
