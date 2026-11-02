@@ -38,6 +38,17 @@ CAMERAS = [
         "display_delay_ms": 0,
     },
     {
+        "id": "suometry",
+        "name": "Suometry",
+        "model": "Suometry",
+        "ip": "10.180.145.41",
+        "url": "rtsp://10.180.145.41:8554/live",
+        "flip": False,
+        "display_delay_ms": 0,
+    },
+]
+
+"""{
         "id": "insta360_pro2_3",
         "name": "Insta 2",
         "model": "Insta 360 Pro2",
@@ -45,8 +56,7 @@ CAMERAS = [
         "url": "rtsp://10.180.145.20/live/live",
         "flip": False,
         "display_delay_ms": 0,
-    },
-]
+    },"""
 
 # ── Serveur NTP pour horodatage absolu ──────────────────────────────────────
 NTP_SERVER = "pool.ntp.org"

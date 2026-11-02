@@ -42,9 +42,11 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QApplication,
 )
 import pyqtgraph as pg
 
+from camera_setup import CameraSetup
 from gst_camera_stream import TimestampedFrame
 from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
@@ -627,6 +629,20 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet(logo.styleSheet() + " letter-spacing:2px;")
         tb.addWidget(logo)
         tb.addStretch()
+
+        self._btn_add_camera = QPushButton("\u27f3  Add Camera")
+        self._btn_add_camera.setFixedSize(140, 28)
+        self._btn_add_camera.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #238636; color: white;
+                border: none; border-radius: 4px;
+                font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover   {{ background-color: {_BLUE}; }}
+            QPushButton:pressed {{ background-color: #196127; }}
+        """)
+        self._btn_add_camera.clicked.connect(self._on_add_camera)
+        tb.addWidget(self._btn_add_camera)
 
         self._btn_align = QPushButton("\u27f3  Align streams")
         self._btn_align.setFixedSize(140, 28)
@@ -1719,6 +1735,17 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ background-color: {_GREEN}; }}
             """)
 
+    # ── Camera Setup ─────────────────────────────────────────────────────────
+    
+    def _on_add_camera(self):
+        dlg = CameraSetup(self)
+
+        if dlg.exec():
+            values = dlg.values()
+
+            print("Name:", values["name"])
+            print("URL:", values["url"])
+        
     # ── Fermeture propre ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
@@ -1740,4 +1767,7 @@ class MainWindow(QMainWindow):
                 self._rec_worker.join(timeout=10.0)
             self._rec_worker = None
             self._rec_queue  = None
+        event.accept()
+        QApplication.closeAllWindows()
+        QApplication.quit()
         event.accept()

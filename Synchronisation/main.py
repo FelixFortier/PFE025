@@ -246,13 +246,16 @@ def main():
     metrics_engine.close()
     print("[CamSync] Done.")
 
+    import threading
+
+    print("\nTHREADS AFTER CLEANUP")
+    for t in threading.enumerate():
+        print(
+            f"{t.name} daemon={t.daemon} alive={t.is_alive()}",
+            flush=True,
+        )
+
     sys.exit(exit_code)
 
-
-print("A", flush=True)
-
 if __name__ == "__main__":
-    print("B", flush=True)
     main()
-
-print("C", flush=True)
