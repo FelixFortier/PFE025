@@ -65,19 +65,8 @@ print("import PyQt5")
 from PyQt5.QtWidgets import QApplication
 print("import rtp")
 from rtp_camera_stream import RtpCameraStream
-print("import configs")
-from config import (
-    CAMERAS,
-    INSTA_DECODER,
-    INSTA_HW_ACCEL,
-    JITTER_WINDOW_SIZE,
-    NTP_SERVER,
-    NTP_SYNC_INTERVAL_SEC,
-    OTTICA_NDI_BANDWIDTH,
-    PLAYOUT_DELAY_MS,
-    SYNC_BUFFER_SEC,
-    TARGET_FPS,
-)
+print("import config")
+import config
 
 print("import gui, ntpclock, aligners, metrics")
 from gui import MainWindow
@@ -93,6 +82,23 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     print("[CamSync] QApplication ready.", flush=True)
+
+    # Lecture et parsing de config.json
+
+    configs = config.load_config_json()
+
+    CAMERAS = configs["cameras"]
+    
+    JITTER_WINDOW_SIZE = configs["JITTER_WINDOW_SIZE"]
+    NTP_SERVER = configs["NTP_SERVER"]
+    NTP_SYNC_INTERVAL_SEC = configs["NTP_SYNC_INTERVAL_SEC"]
+    PLAYOUT_DELAY_MS = configs["PLAYOUT_DELAY_MS"]
+    SYNC_BUFFER_SEC = configs["SYNC_BUFFER_SEC"]
+    TARGET_FPS = configs["TARGET_FPS"]
+
+    INSTA_DECODER = config.get_model_attribute(configs,"Insta 360 Pro2", "decoder")
+    INSTA_HW_ACCEL = config.get_model_attribute(configs,"Insta 360 Pro2", "hw_accel")
+    OTTICA_NDI_BANDWIDTH = config.get_model_attribute(configs,"Ottica 4K", "bandwidth")
 
     # 1. Horloge NTP (fallback si RTCP SR indisponible)
     print("[CamSync] Synchronizing host NTP clock...", flush=True)
@@ -128,7 +134,7 @@ def main():
                 camera_id=cam_cfg["id"],
                 name=cam_cfg["name"],
                 model=model,
-                ndi_url=cam_cfg["ndi_url"],
+                ndi_url=cam_cfg["url"],
                 ntp_clock=ntp_clock,
                 buffer_duration=SYNC_BUFFER_SEC,
                 target_fps=TARGET_FPS,

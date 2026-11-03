@@ -1743,8 +1743,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             values = dlg.values()
 
-            print("Name:", values["name"])
-            print("URL:", values["url"])
+            #TODO call stream append
         
     # ── Fermeture propre ──────────────────────────────────────────────────────
 

@@ -42,6 +42,7 @@ class CameraSetup(QDialog):
         self.model_edit.currentTextChanged.connect(self._on_model_changed)
 
         self.ip_edit = QLineEdit()
+        self.protocol_edit = QLineEdit()
         self.url_edit = QLineEdit()
         self.flip_edit = QLineEdit()
         self.display_delay_edit = QLineEdit()
@@ -51,6 +52,7 @@ class CameraSetup(QDialog):
         form.addRow("Name:", self.name_edit)
         form.addRow("Model:", self.model_edit)
         form.addRow("IP:", self.ip_edit)
+        form.addRow("Protocol", self.protocol_edit)
         form.addRow("URL:", self.url_edit)
         form.addRow("Flip:", self.flip_edit)
         form.addRow("Display Delay (ms):", self.display_delay_edit)
