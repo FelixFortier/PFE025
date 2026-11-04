@@ -65,16 +65,20 @@ def load_config_json():
     with open('config.json', 'r', encoding='utf-8') as file:
         configs = json.load(file)
         return configs
-        #print(configs)
-
-
-def get_cameras(configs):
-    return configs["cameras"]
 
 def get_model_attribute(configs, name, attribute):
     MODELS = configs["models"]
     value = (model[attribute] for model in MODELS if model["name"] == name)
     return next(value, None)
+
+def get_camera_attribute(configs, name, attribute):
+    CAMERAS = configs["cameras"]
+    value = (camera[attribute] for camera in CAMERAS if camera["name"] == name)
+    return next(value, None)
+
+def full_update_config_file(configs):
+    with open("config.json", "w") as file:
+        json.dump(configs, file, indent=4)
         
         
 if __name__ == "__main__":

@@ -86,19 +86,13 @@ def main():
     # Lecture et parsing de config.json
 
     configs = config.load_config_json()
-
     CAMERAS = configs["cameras"]
-    
     JITTER_WINDOW_SIZE = configs["JITTER_WINDOW_SIZE"]
     NTP_SERVER = configs["NTP_SERVER"]
     NTP_SYNC_INTERVAL_SEC = configs["NTP_SYNC_INTERVAL_SEC"]
     PLAYOUT_DELAY_MS = configs["PLAYOUT_DELAY_MS"]
     SYNC_BUFFER_SEC = configs["SYNC_BUFFER_SEC"]
     TARGET_FPS = configs["TARGET_FPS"]
-
-    INSTA_DECODER = config.get_model_attribute(configs,"Insta 360 Pro2", "decoder")
-    INSTA_HW_ACCEL = config.get_model_attribute(configs,"Insta 360 Pro2", "hw_accel")
-    OTTICA_NDI_BANDWIDTH = config.get_model_attribute(configs,"Ottica 4K", "bandwidth")
 
     # 1. Horloge NTP (fallback si RTCP SR indisponible)
     print("[CamSync] Synchronizing host NTP clock...", flush=True)
@@ -124,10 +118,12 @@ def main():
         if not cam_cfg.get("enabled", True):
             print(f"[CamSync] {cam_cfg['name']} disabled, skipping.", flush=True)
             continue
-        model = cam_cfg.get("model", "")
+        protocol = cam_cfg.get("protocol", "")
 
-        if model == "Ottica 4K":
-            ndi_bw = cam_cfg.get("ndi_bandwidth", OTTICA_NDI_BANDWIDTH)
+        model = cam_cfg["model"]
+
+        if protocol == "ndi":
+            ndi_bw = config.get_model_attribute(configs, model, "bandwidth")
             # Respecter la config : timecode NDI hardware par défaut,
             # synthetic_clock seulement si explicitement demandé.
             cs = NdiCameraStream(
@@ -142,21 +138,25 @@ def main():
                 display_delay_ms=cam_cfg.get("display_delay_ms", 0.0),
                 use_synthetic_clock=bool(cam_cfg.get("use_synthetic_clock", False)),
             )
-        else:
+        elif protocol == "rtsp":
+            decoder_backend = config.get_model_attribute(configs,model, "decoder")
+            hw_accel = config.get_model_attribute(configs,model, "hw_accel")
             cs = RtpCameraStream(
                 camera_id=cam_cfg["id"],
                 name=cam_cfg["name"],
-                model=model,
+                model=cam_cfg["model"],
                 url=cam_cfg["url"],
                 ntp_clock=ntp_clock,
                 buffer_duration=SYNC_BUFFER_SEC,
                 target_fps=TARGET_FPS,
                 display_delay_ms=cam_cfg.get("display_delay_ms", 0.0),
                 flip=bool(cam_cfg.get("flip", False)),
-                decoder_backend=cam_cfg.get("decoder_backend", INSTA_DECODER),
-                hw_hwaccel=cam_cfg.get("hw_hwaccel", INSTA_HW_ACCEL),
+                decoder_backend=decoder_backend,
+                hw_hwaccel=hw_accel,
             )
-
+        else :
+            print(f"[CamSync] {cam_cfg['name']} uses a protocol other than NDI or RTSP, skipping.", flush=True)
+        
         streams.append(cs)
 
     # 3. Moteur de métriques / aligneur / validateur
@@ -241,27 +241,54 @@ def main():
     _dyn_timer = _QT()
     _dyn_timer.timeout.connect(dyn_aligner.update)
     _dyn_timer.start(1000)
-
+    
+    _diag_timer.stop()
+    _dyn_timer.stop()
     exit_code = app.exec_()
 
     # Nettoyage
-    print("[CamSync] Shutting down...")
+    print("[CamSync] Shutting down...", flush=True)
+    print("CLEANUP 1 : Streams", flush=True)
     for cs in streams:
+        print(f"Stopping {cs.name}", flush=True)
         cs.stop()
+    print("CLEANUP 2 : NTP Clock", flush=True)
     ntp_clock.stop()
+    print("CLEANUP 2 : Metrics Engine", flush=True)
     metrics_engine.close()
-    print("[CamSync] Done.")
+    print("[CamSync] Done.", flush=True)
 
     import threading
 
-    print("\nTHREADS AFTER CLEANUP")
-    for t in threading.enumerate():
-        print(
-            f"{t.name} daemon={t.daemon} alive={t.is_alive()}",
-            flush=True,
-        )
+    #print("\nTHREADS AFTER CLEANUP")
+    #for t in threading.enumerate():
+    #    print(f"{t.name} {t.ident} daemon={t.daemon} alive={t.is_alive()}",flush=True)
+    #    traceback.print_stack(sys._current_frames()[t.ident])
 
-    sys.exit(exit_code)
+    print("BEFORE SYS.EXIT", flush=True)
+    #sys.exit(exit_code)
+    return
 
 if __name__ == "__main__":
     main()
+    print("MAIN RETURNED")
+    import gc
+
+    print("OBJECTS:", len(gc.get_objects()))
+    from collections import Counter
+
+    counter = Counter(type(obj).__name__ for obj in gc.get_objects())
+
+    for name, count in counter.most_common(30):
+        print(f"{count:8} {name}")
+
+    from PyQt5.QtWidgets import QApplication
+
+    try:
+        print("TOP LEVEL:", QApplication.topLevelWidgets())
+    except Exception as e:
+        print("QApplication gone:", e)
+
+    import atexit
+
+    print("ATEXIT HANDLERS:", atexit._ncallbacks())

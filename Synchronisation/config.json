@@ -1,32 +1,31 @@
 {
-    "NTP_SERVER" : "pool.ntp.org",
-    "NTP_SYNC_INTERVAL_SEC" : 30,
-    "TARGET_FPS" : 30,
-    "SYNC_BUFFER_SEC" : 5.0,
-    "JITTER_WINDOW_SIZE" : 60,
-    "PLAYOUT_DELAY_MS" : 5000,
-
-    "models" : [
+    "NTP_SERVER": "pool.ntp.org",
+    "NTP_SYNC_INTERVAL_SEC": 30,
+    "TARGET_FPS": 30,
+    "SYNC_BUFFER_SEC": 5.0,
+    "JITTER_WINDOW_SIZE": 60,
+    "PLAYOUT_DELAY_MS": 5000,
+    "models": [
         {
-            "name" : "Ottica 4K",
-            "bandwidth" : "highest",
-            "decoder" : "",
-            "hw_accel" : ""
+            "name": "Ottica 4K",
+            "bandwidth": "highest",
+            "decoder": "",
+            "hw_accel": ""
         },
         {
-            "name" : "Insta 360 Pro2",
-            "bandwidth" : "",
-            "decoder" : "pyav",
-            "hw_accel" : ""
+            "name": "Insta 360 Pro2",
+            "bandwidth": "",
+            "decoder": "pyav",
+            "hw_accel": ""
         },
         {
-            "name" : "Suometry",
-            "bandwidth" : "",
-            "decoder" : "",
-            "hw_accel" : ""
+            "name": "Suometry",
+            "bandwidth": "",
+            "decoder": "",
+            "hw_accel": ""
         }
     ],
-    "cameras" : [
+    "cameras": [
         {
             "id": "ottica_4k_1",
             "name": "Ottica 4K #1",
@@ -35,7 +34,8 @@
             "protocol": "ndi",
             "url": "10.180.145.13:5962",
             "flip": "False",
-            "display_delay_ms": 0
+            "display_delay_ms": 0,
+            "enabled": true
         },
         {
             "id": "ottica_4k_2",
@@ -45,7 +45,8 @@
             "protocol": "ndi",
             "url": "10.180.145.58:5962",
             "flip": "False",
-            "display_delay_ms": 0
+            "display_delay_ms": 0,
+            "enabled": true
         },
         {
             "id": "insta360_pro2_1",
@@ -55,7 +56,8 @@
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.19/live/live",
             "flip": "False",
-            "display_delay_ms": 0
+            "display_delay_ms": 0,
+            "enabled": true
         },
         {
             "id": "insta360_pro2_2",
@@ -65,7 +67,8 @@
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.20/live/live",
             "flip": "False",
-            "display_delay_ms": 0
+            "display_delay_ms": 0,
+            "enabled": true
         },
         {
             "id": "insta360_pro2_3",
@@ -74,8 +77,9 @@
             "ip": "10.180.145.53",
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.53/live/live",
-            "flip": "False",
-            "display_delay_ms": 0
+            "flip": false,
+            "display_delay_ms": 0,
+            "enabled": false
         },
         {
             "id": "suometry",
@@ -84,11 +88,9 @@
             "ip": "10.180.145.41",
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.41:8554/live",
-            "flip": "False",
-            "display_delay_ms": 0
+            "flip": false,
+            "display_delay_ms": 0,
+            "enabled": false
         }
     ]
 }
-
-
-

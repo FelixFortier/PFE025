@@ -45,8 +45,9 @@ from PyQt5.QtWidgets import (
     QApplication,
 )
 import pyqtgraph as pg
+pg.setConfigOptions(exitCleanup=True)
 
-from camera_setup import CameraSetup
+from settings_window import SettingsDialog
 from gst_camera_stream import TimestampedFrame
 from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
@@ -630,9 +631,9 @@ class MainWindow(QMainWindow):
         tb.addWidget(logo)
         tb.addStretch()
 
-        self._btn_add_camera = QPushButton("\u27f3  Add Camera")
-        self._btn_add_camera.setFixedSize(140, 28)
-        self._btn_add_camera.setStyleSheet(f"""
+        self._btn_manage_streams = QPushButton("\u2699 Manage Streams")
+        self._btn_manage_streams.setFixedSize(140, 28)
+        self._btn_manage_streams.setStyleSheet(f"""
             QPushButton {{
                 background-color: #238636; color: white;
                 border: none; border-radius: 4px;
@@ -641,8 +642,8 @@ class MainWindow(QMainWindow):
             QPushButton:hover   {{ background-color: {_BLUE}; }}
             QPushButton:pressed {{ background-color: #196127; }}
         """)
-        self._btn_add_camera.clicked.connect(self._on_add_camera)
-        tb.addWidget(self._btn_add_camera)
+        self._btn_manage_streams.clicked.connect(self._on_manage_streams)
+        tb.addWidget(self._btn_manage_streams)
 
         self._btn_align = QPushButton("\u27f3  Align streams")
         self._btn_align.setFixedSize(140, 28)
@@ -783,13 +784,15 @@ class MainWindow(QMainWindow):
         #    comprise (temps_visuel = ntp + display_delay + calib_delay).
         # 2) « Résidu temporel » : écart du timestamp affiché de chaque flux
         #    vs le temps de référence calculé par l'aligneur (ancien graphe).
+        
         pg.setConfigOptions(antialias=True)
 
+        
         _PLOT_COLORS = ["#58a6ff", "#3fb950", "#f85149",
                         "#bc8cff", "#ff7b72", "#79c0ff", "#56d364"]
 
         def _build_plot(title: str, ylabel: str):
-            """Construit un PlotWidget configuré + ses courbes par caméra."""
+            #Construit un PlotWidget configuré + ses courbes par caméra.
             w = pg.PlotWidget(title=title)
             w.setBackground(_BG2)
             w.showGrid(x=True, y=True, alpha=0.3)
@@ -876,7 +879,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)  # graphes = 1/4
 
         root.addWidget(splitter, stretch=1)
-
+        
     # ── Timers ────────────────────────────────────────────────────────────────
 
     def _start_timers(self):
@@ -1593,7 +1596,8 @@ class MainWindow(QMainWindow):
             body.append("Not detected: " + ", ".join(result.not_detected))
         msg.setText("<br>".join(body))
         msg.setStandardButtons(QMessageBox.Ok)
-        msg.show()
+        #msg.show()
+        msg.exec()#test
 
         # Trace console pour log/analyse a posteriori
         print("[FlashCalib] Results:", flush=True)
@@ -1737,20 +1741,33 @@ class MainWindow(QMainWindow):
 
     # ── Camera Setup ─────────────────────────────────────────────────────────
     
-    def _on_add_camera(self):
-        dlg = CameraSetup(self)
+    def _on_manage_streams(self):
+        sd = SettingsDialog(self)
+        sd.exec_()
+        #TODO call stream append
 
-        if dlg.exec():
-            values = dlg.values()
 
-            #TODO call stream append
+            
         
     # ── Fermeture propre ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+
+        try:
+            self._plot_widget.close()
+            self._plot_widget.deleteLater()
+
+            self._plot_widget_raw.close()
+            self._plot_widget_raw.deleteLater()
+        except Exception as e:
+            print(e)
+
+        from PyQt5.QtWidgets import QApplication
+
         for t in (self._timer_video, self._timer_metrics,
                   self._timer_flash, self._timer_rec):
             t.stop()
+
         # Arrêt propre du thread de push d'enregistrement.
         try:
             self._rec_push_stop.set()
@@ -1766,7 +1783,10 @@ class MainWindow(QMainWindow):
                 self._rec_worker.join(timeout=10.0)
             self._rec_worker = None
             self._rec_queue  = None
-        event.accept()
-        QApplication.closeAllWindows()
+        for widget in QApplication.allWidgets():
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
         QApplication.quit()
         event.accept()

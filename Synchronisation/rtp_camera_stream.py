@@ -496,6 +496,8 @@ class RtpCameraStream:
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread:
+            with self._lock:
+                self._buffer.clear()
             self._thread.join(timeout=8)
             self._thread = None
         self._connected = False
@@ -603,8 +605,11 @@ class RtpCameraStream:
             self._connected = False
             if self._stop_event.is_set():
                 break
-            time.sleep(backoff)
+            if self._stop_event.wait(backoff):
+                break
             backoff = min(backoff * 1.5, 15.0)
+
+            print(f"[{self.name}] _run() exit", flush=True)
 
     def _session_loop(self) -> None:
         rtsp = _RTSPSession(self.url)
@@ -737,8 +742,16 @@ class RtpCameraStream:
         try:
             self._reader_loop_tcp(rtsp, au_queue)
         finally:
-            au_queue.put(None)                     # sentinelle d'arrêt
+            try:
+                while True:
+                    au_queue.get_nowait()
+            except queue.Empty:
+                pass
+            au_queue.put_nowait(None)
             decoder_thread.join(timeout=3)
+            
+            if decoder_thread.is_alive():
+                print(f"[{self.name}] DECODER STILL ALIVE", flush=True)
 
     def _reader_loop_tcp(self, rtsp: _RTSPSession,
                          au_queue: "queue.Queue") -> None:
@@ -841,6 +854,7 @@ class RtpCameraStream:
                     diag_resync += 1
                 au_nalus = []
                 au_rtp_ts = None
+        print(f"[{self.name}] READER EXIT")
 
     @staticmethod
     def _au_contains_idr(au_bytes: bytes) -> bool:
