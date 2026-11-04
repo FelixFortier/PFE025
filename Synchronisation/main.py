@@ -59,16 +59,10 @@ if _NDI_SRC:
     if _NDI_SRC not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _NDI_SRC + os.pathsep + os.environ.get("PATH", "")
 
-print("import NDI")
 from ndi_camera_stream import NdiCameraStream
-print("import PyQt5")
 from PyQt5.QtWidgets import QApplication
-print("import rtp")
 from rtp_camera_stream import RtpCameraStream
-print("import config")
 import config
-
-print("import gui, ntpclock, aligners, metrics")
 from gui import MainWindow
 from ntp_clock import NTPClock
 from stream_aligner import StreamAligner
@@ -258,37 +252,8 @@ def main():
     metrics_engine.close()
     print("[CamSync] Done.", flush=True)
 
-    import threading
-
-    #print("\nTHREADS AFTER CLEANUP")
-    #for t in threading.enumerate():
-    #    print(f"{t.name} {t.ident} daemon={t.daemon} alive={t.is_alive()}",flush=True)
-    #    traceback.print_stack(sys._current_frames()[t.ident])
-
     print("BEFORE SYS.EXIT", flush=True)
-    #sys.exit(exit_code)
-    return
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
-    print("MAIN RETURNED")
-    import gc
-
-    print("OBJECTS:", len(gc.get_objects()))
-    from collections import Counter
-
-    counter = Counter(type(obj).__name__ for obj in gc.get_objects())
-
-    for name, count in counter.most_common(30):
-        print(f"{count:8} {name}")
-
-    from PyQt5.QtWidgets import QApplication
-
-    try:
-        print("TOP LEVEL:", QApplication.topLevelWidgets())
-    except Exception as e:
-        print("QApplication gone:", e)
-
-    import atexit
-
-    print("ATEXIT HANDLERS:", atexit._ncallbacks())

@@ -33,7 +33,7 @@
             "ip": "10.180.145.13",
             "protocol": "ndi",
             "url": "10.180.145.13:5962",
-            "flip": "False",
+            "flip": false,
             "display_delay_ms": 0,
             "enabled": true
         },
@@ -44,7 +44,7 @@
             "ip": "10.180.145.58",
             "protocol": "ndi",
             "url": "10.180.145.58:5962",
-            "flip": "False",
+            "flip": false,
             "display_delay_ms": 0,
             "enabled": true
         },
@@ -55,7 +55,7 @@
             "ip": "10.180.145.19",
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.19/live/live",
-            "flip": "False",
+            "flip": false,
             "display_delay_ms": 0,
             "enabled": true
         },
@@ -66,7 +66,7 @@
             "ip": "10.180.145.20",
             "protocol": "rtsp",
             "url": "rtsp://10.180.145.20/live/live",
-            "flip": "False",
+            "flip": false,
             "display_delay_ms": 0,
             "enabled": true
         },
@@ -90,7 +90,7 @@
             "url": "rtsp://10.180.145.41:8554/live",
             "flip": false,
             "display_delay_ms": 0,
-            "enabled": false
+            "enabled": true
         }
     ]
 }

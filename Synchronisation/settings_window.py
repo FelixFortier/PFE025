@@ -74,6 +74,7 @@ class SettingsDialog(QDialog):
         self.general_tab.save()
         self.models_tab.save()
         self.cameras_tab.save()
+        config.full_update_config_file(self.configs)
 
     def accept_changes(self):
         self.apply()
@@ -403,10 +404,8 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
-    dialog = SettingsDialog(configs)
+    dialog = SettingsDialog()
 
-    if dialog.exec_():
-        with open("config.json", "w") as f:
-            json.dump(configs, f, indent=4)
+    dialog.exec_()
 
     sys.exit(0)
