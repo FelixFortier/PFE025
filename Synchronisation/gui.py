@@ -23,6 +23,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
+from collections import deque
+import pyqtgraph as pg
 
 import av
 import cv2
@@ -572,16 +574,9 @@ class RecordingWorker(threading.Thread):
 class MainWindow(QMainWindow):
     """Fenêtre principale de l'application."""
 
-    def __init__(self, cameras: list, ntp_clock: NTPClock,
-                 metrics_engine: SyncMetricsEngine, aligner: StreamAligner,
-                 dyn_aligner=None,
-                 ):
+    def __init__(self, runtime):
         super().__init__()
-        self._cameras        = cameras
-        self._clock          = ntp_clock
-        self._metrics_engine = metrics_engine
-        self._aligner        = aligner
-        self._dyn_aligner    = dyn_aligner
+        self.runtime = runtime
 
         self.setWindowTitle("Cam_Synchro")
         self.setMinimumSize(1280, 760)
@@ -596,14 +591,14 @@ class MainWindow(QMainWindow):
         self._rec_worker: RecordingWorker | None = None
         self._last_snap_ntp: float = 0.0  # déduplication côté producteur
 
-        self._flash_calib = FlashCalibrator(cameras)
+        self._flash_calib = FlashCalibrator(self.runtime.streams)
         # Historique des calibrations idéales absolues (fenêtre glissante de 5).
         # Chaque entrée = {cam_id: ideal_calib_ms} — valeur absolue indépendante
         # de la calibration courante. Jamais remis à zéro entre les applications :
         # la médiane sur N mesures absorbe la variabilité pipeline ±75ms des Insta.
         self._flash_history: list[dict] = []
         self._flash_reject_streak: int = 0
-        self._cam_name_by_id = {c.camera_id: c.name for c in cameras}
+        self._cam_name_by_id = {c.camera_id: c.name for c in self.runtime.streams}
 
         self._build_ui()
         self._start_timers()
@@ -763,21 +758,21 @@ class MainWindow(QMainWindow):
             f"QSplitter::handle {{ background-color: {_BORDER}; height: 3px; }}")
 
         # ── Grille vidéo ─────────────────────────────────────────────────
-        video_container = QWidget()
-        n      = len(self._cameras)
+        self.video_container = QWidget()
+        n      = len(self.runtime.streams)
         nb_col = math.ceil(math.sqrt(n))
 
-        grid = QGridLayout(video_container)
-        grid.setContentsMargins(10, 4, 10, 4)
-        grid.setSpacing(8)
+        self.grid = QGridLayout(self.video_container)
+        self.grid.setContentsMargins(10, 4, 10, 4)
+        self.grid.setSpacing(8)
 
         self._cam_widgets: dict[str, CameraWidget] = {}
-        for idx, cam in enumerate(self._cameras):
+        for idx, cam in enumerate(self.runtime.streams):
             cw = CameraWidget(idx, cam)
-            grid.addWidget(cw, idx // nb_col, idx % nb_col)
+            self.grid.addWidget(cw, idx // nb_col, idx % nb_col)
             self._cam_widgets[cam.camera_id] = cw
 
-        splitter.addWidget(video_container)
+        splitter.addWidget(self.video_container)
 
         # ── Graphiques : deux vues empilées ─────────────────────────────
         # 1) « Désync visuelle » : ce que l'œil voit à l'écran, calibration
@@ -834,15 +829,15 @@ class MainWindow(QMainWindow):
 
             curves: dict[str, pg.PlotDataItem] = {}
             history: dict[str, collections.deque] = {}
-            for i, cam in enumerate(self._cameras[1:]):
+            for i, cam in enumerate(self.runtime.streams[1:]):
                 color = _PLOT_COLORS[i % len(_PLOT_COLORS)]
                 curves[cam.camera_id] = w.plot(
                     pen=pg.mkPen(color, width=2),
-                    name=f"{cam.name} − {self._cameras[0].name}")
+                    name=f"{cam.name} − {self.runtime.streams[0].name}")
                 history[cam.camera_id] = collections.deque(maxlen=300)
             return w, curves, history
 
-        ref_name = self._cameras[0].name
+        ref_name = self.runtime.streams[0].name
         # Graphe 1 : désync visuelle (effet réel perçu, calibration comprise)
         self._plot_widget, self._plot_curves, self._plot_history = _build_plot(
             f"Visual desync vs {ref_name}",
@@ -865,7 +860,7 @@ class MainWindow(QMainWindow):
 
         # Marker vertical au moment où l'alignement est (dés)activé
         self._align_markers: list = []
-        self._last_align_state: bool = self._aligner.is_enabled
+        self._last_align_state: bool = self.runtime.aligner.is_enabled
 
         # Les deux graphes empilés verticalement dans un sous-splitter
         plots_splitter = QSplitter(Qt.Vertical)
@@ -1016,15 +1011,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _refresh_video(self):
-        if self._aligner.is_enabled:
-            snapshot = self._aligner.get_aligned_frames()
-            for cam in self._cameras:
+        if self.runtime.aligner.is_enabled:
+            snapshot = self.runtime.aligner.get_aligned_frames()
+            for cam in self.runtime.streams:
                 tf = snapshot.frames.get(cam.camera_id)
                 self._cam_widgets[cam.camera_id].refresh(
                     tf,
                     residual_ms=snapshot.residuals_ms.get(cam.camera_id))
         else:
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 tf = cam.latest_frame()
                 self._cam_widgets[cam.camera_id].refresh(tf)
 
@@ -1036,7 +1031,7 @@ class MainWindow(QMainWindow):
         snapshots à la queue du worker.
 
         Toutes les opérations effectuées ici sont thread-safe :
-          - `self._aligner.get_aligned_frames()` : lecture des buffers
+          - `self.runtime.aligner.get_aligned_frames()` : lecture des buffers
             internes des caméras (locks internes).
           - `self._push_snapshot_to_rec()` : push dans une `queue.Queue`
             (thread-safe par construction) + lecture/écriture d'attributs
@@ -1048,7 +1043,7 @@ class MainWindow(QMainWindow):
             t0 = time.monotonic()
             if self._recording:
                 try:
-                    snapshot = self._aligner.get_aligned_frames()
+                    snapshot = self.runtime.aligner.get_aligned_frames()
                     self._push_snapshot_to_rec(snapshot)
                 except Exception as e:
                     print(f"[RecPushThread] Erreur : {e}", flush=True)
@@ -1063,16 +1058,16 @@ class MainWindow(QMainWindow):
         # métriques, les cartes et le graphique.
         snap: AlignedSnapshot | None = None
         aligned_ts = None
-        if self._aligner.is_enabled:
-            snap = self._aligner.get_aligned_frames()
-            offsets = self._aligner.get_offsets()
+        if self.runtime.aligner.is_enabled:
+            snap = self.runtime.aligner.get_aligned_frames()
+            offsets = self.runtime.aligner.get_offsets()
             aligned_ts = {}
             for cid, tf in snap.frames.items():
                 if tf is not None:
                     # Timestamp corrigé = timestamp brut + offset correctif
                     aligned_ts[cid] = tf.ntp_timestamp + offsets.get(cid, 0.0)
 
-        metrics = self._metrics_engine.compute_all_pairs(aligned_ts)
+        metrics = self.runtime.metrics_engine.compute_all_pairs(aligned_ts)
 
         if metrics:
             max_off    = max(abs(m.offset_ms)   for m in metrics)
@@ -1095,7 +1090,7 @@ class MainWindow(QMainWindow):
         self._card_jitter.set_value(avg_jitter,   color=_offset_color(avg_jitter))
         self._card_drift.set_value(drift_per_min, fmt="{:+.2f}")
 
-        self._aligner.check_drift_recalib(metrics)
+        self.runtime.aligner.check_drift_recalib(metrics)
 
         # ── Mise à jour graphique : désynchronisation visuelle réelle ────────
         # On trace le « temps visuel » de chaque frame affichée vs la référence :
@@ -1109,8 +1104,8 @@ class MainWindow(QMainWindow):
         # réelle (≈ 0 si bien synchro), cohérente avec le Visual spread du Flash
         # Calib. Mode OFF : latest_frame() applique déjà calib_delay en interne,
         # donc la même formule reste valable.
-        ref_cam = self._cameras[0]
-        if self._aligner.is_enabled and snap is not None:
+        ref_cam = self.runtime.streams[0]
+        if self.runtime.aligner.is_enabled and snap is not None:
             ref_tf = snap.frames.get(ref_cam.camera_id)
         else:
             snap = None
@@ -1133,13 +1128,13 @@ class MainWindow(QMainWindow):
             #  - Mode OFF : pas de cible → écart des ntp_timestamp bruts des
             #    frames les plus récentes (réalité avant alignement).
             ref_residual = 0.0
-            if self._aligner.is_enabled and snap is not None:
+            if self.runtime.aligner.is_enabled and snap is not None:
                 ref_residual = snap.residuals_ms.get(ref_cam.camera_id, 0.0)
 
-            for cam in self._cameras[1:]:
+            for cam in self.runtime.streams[1:]:
                 cid = cam.camera_id
                 # ── Graphe 1 : désync visuelle (frame réellement affichée) ──
-                if self._aligner.is_enabled and snap is not None:
+                if self.runtime.aligner.is_enabled and snap is not None:
                     cam_tf = snap.frames.get(cid)
                 else:
                     cam_tf = cam.latest_frame()
@@ -1151,10 +1146,12 @@ class MainWindow(QMainWindow):
                     delta_ms = (cam_vis - ref_vis) * 1000.0
                     self._plot_history[cid].append(delta_ms)
                 else:
+                    if cid not in self._plot_history:
+                        self._plot_history[cid] = deque(maxlen=300)
                     self._plot_history[cid].append(float("nan"))
 
                 # ── Graphe 2 : résidu vs temps de référence calculé ─────────
-                if self._aligner.is_enabled and snap is not None:
+                if self.runtime.aligner.is_enabled and snap is not None:
                     cam_residual = snap.residuals_ms.get(cid)
                     if cam_residual is not None:
                         self._plot_history_raw[cid].append(
@@ -1173,15 +1170,15 @@ class MainWindow(QMainWindow):
             self._plot_time_history.append(t_sec)
 
             # Marker vertical si l'état d'alignement a changé
-            if self._aligner.is_enabled != self._last_align_state:
-                color = '#3fb950' if self._aligner.is_enabled else '#f0c040'
+            if self.runtime.aligner.is_enabled != self._last_align_state:
+                color = '#3fb950' if self.runtime.aligner.is_enabled else '#f0c040'
                 for w in (self._plot_widget, self._plot_widget_raw):
                     marker = pg.InfiniteLine(
                         angle=90, pos=t_sec,
                         pen=pg.mkPen(color, width=1, style=Qt.DotLine))
                     w.addItem(marker)
                     self._align_markers.append((t_sec, w, marker))
-                self._last_align_state = self._aligner.is_enabled
+                self._last_align_state = self.runtime.aligner.is_enabled
 
             x = list(self._plot_time_history)
             for cid, curve in self._plot_curves.items():
@@ -1224,7 +1221,7 @@ class MainWindow(QMainWindow):
         if not offs:
             return {}
 
-        cam_by_id = {c.camera_id: c for c in self._cameras}
+        cam_by_id = {c.camera_id: c for c in self.runtime.streams}
         max_off = max(offs.values())
 
         # Calibration idéale absolue pour ce flash :
@@ -1351,7 +1348,7 @@ class MainWindow(QMainWindow):
         """Remet tous les délais de calibration flash à 0 et vide l'historique."""
         self._flash_history.clear()
         self._flash_reject_streak = 0
-        for cam in self._cameras:
+        for cam in self.runtime.streams:
             if hasattr(cam, "set_calibration_delay"):
                 cam.set_calibration_delay(0.0)
         print("[FlashCalib] Calibration RESET — all calib_delay set to 0 ms, "
@@ -1379,7 +1376,7 @@ class MainWindow(QMainWindow):
         # la médiane RTCP converge ; avant cela, les timestamps Insta dérivent.
         _RTCP_MIN_SR = 20
         rtcp_warn = []
-        for _cam in self._cameras:
+        for _cam in self.runtime.streams:
             if hasattr(_cam, 'sr_count') and hasattr(_cam, 'name'):
                 _sc = _cam.sr_count
                 if 0 < _sc < _RTCP_MIN_SR:
@@ -1628,7 +1625,7 @@ class MainWindow(QMainWindow):
                   flush=True)
             rec_paths: dict[str, str] = {}
             csv_paths: dict[str, str] = {}
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 safe_name = cam.name.replace(" ", "_").replace("/", "_").replace("#", "N")
                 rec_paths[cam.camera_id] = os.path.join(
                     self._record_dir, f"{safe_name}.mkv")
@@ -1639,7 +1636,7 @@ class MainWindow(QMainWindow):
             self._rec_queue  = queue.Queue(maxsize=8)
             self._rec_worker = RecordingWorker(
                 snapshot_queue=self._rec_queue,
-                cameras=self._cameras,
+                cameras=self.runtime.streams,
                 rec_paths=rec_paths,
                 csv_paths=csv_paths,
             )
@@ -1681,7 +1678,7 @@ class MainWindow(QMainWindow):
                   f"{written} snapshots written, {dropped} dropped", flush=True)
             summary_parts = []
             fps_real = (written / elapsed) if elapsed > 0 else 0.0
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 print(f"[CamSync]   {cam.name:<22}  {written:5d} frames  "
                       f"({fps_real:5.1f} fps avg)", flush=True)
                 summary_parts.append(
@@ -1693,7 +1690,7 @@ class MainWindow(QMainWindow):
                 self._lbl_val_icon.setStyleSheet(_style(_GREEN, 16, bold=True))
                 m = int(elapsed // 60); s = int(elapsed % 60)
                 self._lbl_val_title.setText(
-                    f"Recording finished  {m:02d}:{s:02d}  ({len(self._cameras)} cameras)")
+                    f"Recording finished  {m:02d}:{s:02d}  ({len(self.runtime.streams)} cameras)")
                 self._lbl_val_detail.setText("   ".join(summary_parts))
                 self._lbl_val_spread.setText(f"Saved → {self._record_dir}")
                 self._validation_bar.setVisible(True)
@@ -1717,8 +1714,8 @@ class MainWindow(QMainWindow):
             """)
 
     def _on_align_toggle(self):
-        self._aligner.toggle()
-        if self._aligner.is_enabled:
+        self.runtime.aligner.toggle()
+        if self.runtime.aligner.is_enabled:
             self._btn_align.setText("\u2713  Aligned")
             self._btn_align.setStyleSheet(f"""
                 QPushButton {{
@@ -1743,11 +1740,108 @@ class MainWindow(QMainWindow):
     
     def _on_manage_streams(self):
         sd = SettingsDialog(self)
-        sd.exec_()
-        #TODO call stream append
+        if sd.exec_():
+            self.runtime.restart()
 
+    def rebuild_graph_state(self):
 
-            
+        _PLOT_COLORS = [
+            "#58a6ff",
+            "#3fb950",
+            "#f85149",
+            "#bc8cff",
+            "#ff7b72",
+            "#79c0ff",
+            "#56d364",]
+
+        # Clear existing curves
+
+        for curve in self._plot_curves.values():
+            try:
+                self._plot_widget.removeItem(curve)
+            except Exception:
+                pass
+        for curve in self._plot_curves_raw.values():
+            try:
+                self._plot_widget_raw.removeItem(curve)
+            except Exception:
+                pass
+
+        self._plot_curves.clear()
+        self._plot_curves_raw.clear()
+        self._plot_history.clear()
+        self._plot_history_raw.clear()
+
+        # Rebuild camera name map
+        self._cam_name_by_id = {
+            c.camera_id: c.name
+            for c in self.runtime.streams
+        }
+        
+        # Reset histories
+        self._plot_time_history = deque(maxlen=300)
+
+        # Recreate curves
+        if len(self.runtime.streams) <= 1:
+            return
+
+        ref_name = self.runtime.streams[0].name
+
+        for idx, cam in enumerate(self.runtime.streams[1:]):
+
+            color = _PLOT_COLORS[idx % len(_PLOT_COLORS)]
+
+            # Visual desync graph
+            self._plot_curves[cam.camera_id] = self._plot_widget.plot(
+                pen=pg.mkPen(color, width=2),
+                name=f"{cam.name} - {ref_name}",
+            )
+
+            self._plot_history[cam.camera_id] = deque(maxlen=300)
+
+            # Raw residual graph
+            self._plot_curves_raw[cam.camera_id] = self._plot_widget_raw.plot(
+                pen=pg.mkPen(color, width=2),
+                name=f"{cam.name} - {ref_name}",
+            )
+
+            self._plot_history_raw[cam.camera_id] = deque(maxlen=300)
+
+        # Reset markers/history
+        for _, plot_widget, marker in self._align_markers:
+            try:
+                plot_widget.removeItem(marker)
+            except Exception:
+                pass
+
+        self._align_markers.clear()
+        self._plot_t0 = 0.0
+        self._max_off_window.clear()
+        self._last_align_state = self.runtime.aligner.is_enabled
+
+        self._flash_calib = FlashCalibrator(self.runtime.streams
+                                            )
+        print(f"[GUI] Graph state rebuilt for {len(self.runtime.streams)} cameras.",flush=True,)
+    
+    def rebuild_grid(self):
+
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._cam_widgets.clear()
+
+        n      = len(self.runtime.streams)
+        nb_col = math.ceil(math.sqrt(n))
+
+        self._cam_widgets: dict[str, CameraWidget] = {}
+        for idx, cam in enumerate(self.runtime.streams):
+            cw = CameraWidget(idx, cam)
+            self.grid.addWidget(cw, idx // nb_col, idx % nb_col)
+            self._cam_widgets[cam.camera_id] = cw
+        
+        self.rebuild_graph_state()
         
     # ── Fermeture propre ──────────────────────────────────────────────────────
 

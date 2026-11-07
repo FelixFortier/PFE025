@@ -79,7 +79,7 @@
             "url": "rtsp://10.180.145.53/live/live",
             "flip": false,
             "display_delay_ms": 0,
-            "enabled": false
+            "enabled": true
         },
         {
             "id": "suometry",
