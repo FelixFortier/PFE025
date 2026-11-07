@@ -2,6 +2,9 @@
 Configuration des caméras et paramètres de l'application.
 """
 import json
+import os
+
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
 
 # ── Définition des caméras ──────────────────────────────────────────────────
 CAMERAS = None
@@ -62,7 +65,7 @@ MODELS = None
 # Software : LOW_DELAY + thread_count=4 → jitter < 50ms
 
 def load_config_json():
-    with open('config.json', 'r', encoding='utf-8') as file:
+    with open(_CONFIG_PATH, 'r', encoding='utf-8') as file:
         configs = json.load(file)
         return configs
 
@@ -77,7 +80,7 @@ def get_camera_attribute(configs, name, attribute):
     return next(value, None)
 
 def full_update_config_file(configs):
-    with open("config.json", "w") as file:
+    with open(_CONFIG_PATH, "w") as file:
         json.dump(configs, file, indent=4)
         
         
