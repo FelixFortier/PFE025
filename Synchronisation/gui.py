@@ -51,6 +51,7 @@ from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
 from stream_aligner import AlignedSnapshot, StreamAligner
 from sync_metrics import SyncMetricsEngine
+from Synchronisation.tmiv_saver import write_tmiv_metadata
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PALETTE
@@ -507,8 +508,17 @@ class RecordingWorker(threading.Thread):
                 except Exception as e:
                     print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
 
-            # ── Écriture du JSON de métadonnées TMIV ───────────────────
-            self._write_tmiv_metadata(frame_sizes, frame_idx)
+            # ── Écriture des métadonnées TMIV ───────────────────────────
+            if self._rec_paths and frame_sizes:
+                _first = next(iter(self._rec_paths.values()), None)
+                if _first:
+                    write_tmiv_metadata(
+                        out_dir     = os.path.dirname(_first),
+                        cameras     = self._cameras,
+                        rec_paths   = self._rec_paths,
+                        frame_sizes = frame_sizes,
+                        n_frames    = max(frame_idx.values()) if frame_idx else self.written,
+                    )
 
             for f in csv_files.values():
                 try:
@@ -531,64 +541,6 @@ class RecordingWorker(threading.Thread):
 
             print(f"[RecordingWorker] Done — {self.written} snapshots written, "
                   f"{self.dropped} dropped.", flush=True)
-
-    def _write_tmiv_metadata(self, frame_sizes: dict, frame_idx: dict,
-                              fps: float = 30.0) -> None:
-        """Écrit le fichier JSON de métadonnées au format TMIV (ISO/IEC 23090-12).
-
-        TMIV attend :
-          - Des fichiers YUV420p raw I420 non compressés, un par caméra.
-          - Un JSON décrivant la séquence : résolution, fps, nb frames,
-            paramètres de projection/pose de chaque caméra.
-
-        La structure est conforme au schéma TMIV v4 (CTC).
-        Les champs Position/Rotation doivent être complétés avec les
-        résultats de calibration (Calibration/).
-        """
-        if not self._rec_paths or not frame_sizes:
-            return
-        import json as _json
-        first_path = next(iter(self._rec_paths.values()), None)
-        if first_path is None:
-            return
-        out_dir   = os.path.dirname(first_path)
-        meta_path = os.path.join(out_dir, "tmiv_metadata.json")
-
-        n_frames = max(frame_idx.values()) if frame_idx else self.written
-
-        cameras_meta = []
-        for cam in self._cameras:
-            cid  = cam.camera_id
-            w, h = frame_sizes.get(cid, (0, 0))
-            cameras_meta.append({
-                "Name":            cam.name,
-                "BitDepthColor":   8,
-                "ColorSpace":      "YUV420",
-                "Resolution":      [w, h],
-                "Projection":      "Perspective",
-                "Position":        [0.0, 0.0, 0.0],
-                "Rotation":        [0.0, 0.0, 0.0],
-                "Depth_range":     [0.1, 1000.0],
-                "BitDepthDepth":   16,
-                "DepthColorSpace": "YUV420",
-                "yuv_file":        os.path.basename(
-                    self._rec_paths.get(cid, "")),
-            })
-
-        metadata = {
-            "Version":        "4.0",
-            "Content_name":   os.path.basename(out_dir),
-            "Fps":            fps,
-            "NumberOfFrames": n_frames,
-            "cameras":        cameras_meta,
-        }
-        try:
-            with open(meta_path, 'w', encoding='utf-8') as mf:
-                _json.dump(metadata, mf, indent=2)
-            print(f"[RecordingWorker] TMIV metadata → {meta_path}", flush=True)
-        except Exception as e:
-            print(f"[RecordingWorker] Erreur écriture metadata TMIV : {e}",
-                  flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
