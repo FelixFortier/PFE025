@@ -55,6 +55,7 @@ from ntp_clock import NTPClock
 from stream_aligner import AlignedSnapshot, StreamAligner
 from sync_metrics import SyncMetricsEngine
 from tmiv_saver import write_tmiv_metadata
+from tmiv_saver import write_tmiv_metadata
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PALETTE
@@ -386,11 +387,14 @@ class RecordingWorker(threading.Thread):
 
     def _init_cam_writer(self, cam, tf,
                          yuv_files: dict, frame_sizes: dict,
+                         yuv_files: dict, frame_sizes: dict,
                          csv_files: dict, frame_idx: dict) -> None:
+        """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
         """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
 
         Extrait du run() pour permettre l'initialisation tardive d'une caméra
         qui n'avait pas encore de frame au premier snapshot.
+        Les dimensions doivent être paires (requis par YUV420 / TMIV).
         Les dimensions doivent être paires (requis par YUV420 / TMIV).
         """
         path = self._rec_paths.get(cam.camera_id)
@@ -398,6 +402,10 @@ class RecordingWorker(threading.Thread):
             return
         h, w = tf.frame.shape[:2]
 
+        # Fichier binaire brut : chaque frame = Y(w×h) + U(w/2×h/2) + V(w/2×h/2)
+        yuv_files[cam.camera_id]   = open(str(path), 'wb')
+        frame_sizes[cam.camera_id] = (w, h)
+        frame_idx[cam.camera_id]   = 0
         # Fichier binaire brut : chaque frame = Y(w×h) + U(w/2×h/2) + V(w/2×h/2)
         yuv_files[cam.camera_id]   = open(str(path), 'wb')
         frame_sizes[cam.camera_id] = (w, h)
@@ -410,6 +418,10 @@ class RecordingWorker(threading.Thread):
             csv_files[cam.camera_id] = f
 
     def run(self):
+        yuv_files:   dict = {}   # camera_id → file handle (binaire brut I420)
+        frame_sizes: dict = {}   # camera_id → (width, height)
+        csv_files:   dict = {}   # camera_id → file handle
+        frame_idx:   dict = {}   # camera_id → int
         yuv_files:   dict = {}   # camera_id → file handle (binaire brut I420)
         frame_sizes: dict = {}   # camera_id → (width, height)
         csv_files:   dict = {}   # camera_id → file handle
@@ -446,6 +458,7 @@ class RecordingWorker(threading.Thread):
                             continue
                         self._init_cam_writer(
                             cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
+                            cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         )
 
                 # ── Initialisation tardive des caméras manquantes ───────
@@ -453,11 +466,13 @@ class RecordingWorker(threading.Thread):
                 # snapshot, elle est ajoutée dès qu'une frame est disponible).
                 for cam in self._cameras:
                     if cam.camera_id in yuv_files:
+                    if cam.camera_id in yuv_files:
                         continue
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or tf.frame is None:
                         continue
                     self._init_cam_writer(
+                        cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                     )
                     print(
@@ -472,12 +487,27 @@ class RecordingWorker(threading.Thread):
                 # cv2.cvtColor libère le GIL → conversion C réellement parallèle.
                 # Chaque frame BGR→I420 : ~2-5 ms/cam, écriture I/O directe.
                 # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
+                # ── Conversion YUV420p (I420) et écriture brute ───────
+                # cv2.cvtColor libère le GIL → conversion C réellement parallèle.
+                # Chaque frame BGR→I420 : ~2-5 ms/cam, écriture I/O directe.
+                # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
                 def _encode_cam(cam):
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or cam.camera_id not in yuv_files:
+                    if tf is None or cam.camera_id not in yuv_files:
                         return
                     yuv_file = yuv_files[cam.camera_id]
+                    yuv_file = yuv_files[cam.camera_id]
 
+                    # Conversion BGR → YUV420p planar I420 (non compressé)
+                    # Les dimensions doivent être paires (requis par YUV420).
+                    yuv = cv2.cvtColor(tf.frame, cv2.COLOR_BGR2YUV_I420)
+                    yuv_file.write(yuv.tobytes())
+
+                    idx        = frame_idx[cam.camera_id]
+                    h_frame    = tf.frame.shape[0]
+                    mean_luma  = float(yuv[:h_frame].mean())  # plan Y uniquement
+                    csv_f      = csv_files.get(cam.camera_id)
                     # Conversion BGR → YUV420p planar I420 (non compressé)
                     # Les dimensions doivent être paires (requis par YUV420).
                     yuv = cv2.cvtColor(tf.frame, cv2.COLOR_BGR2YUV_I420)
@@ -508,7 +538,25 @@ class RecordingWorker(threading.Thread):
                 try:
                     yuv_f.flush()
                     yuv_f.close()
+            # ── Fermeture des fichiers YUV bruts ────────────────────────
+            for cam_id, yuv_f in yuv_files.items():
+                try:
+                    yuv_f.flush()
+                    yuv_f.close()
                 except Exception as e:
+                    print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
+
+            # ── Écriture des métadonnées TMIV ───────────────────────────
+            if self._rec_paths and frame_sizes:
+                _first = next(iter(self._rec_paths.values()), None)
+                if _first:
+                    write_tmiv_metadata(
+                        out_dir     = os.path.dirname(_first),
+                        cameras     = self._cameras,
+                        rec_paths   = self._rec_paths,
+                        frame_sizes = frame_sizes,
+                        n_frames    = max(frame_idx.values()) if frame_idx else self.written,
+                    )
                     print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
 
             # ── Écriture des métadonnées TMIV ───────────────────────────
@@ -1601,12 +1649,14 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(
                 f"Cam_Synchro \u2014 \u23fa REC")
             print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
+            print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
                   flush=True)
             rec_paths: dict[str, str] = {}
             csv_paths: dict[str, str] = {}
             for cam in self.runtime.streams:
                 safe_name = cam.name.replace(" ", "_").replace("/", "_").replace("#", "N")
                 rec_paths[cam.camera_id] = os.path.join(
+                    self._record_dir, f"{safe_name}.yuv")
                     self._record_dir, f"{safe_name}.yuv")
                 csv_paths[cam.camera_id] = os.path.join(
                     self._record_dir, f"{safe_name}.csv")
