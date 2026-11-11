@@ -51,7 +51,7 @@ from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
 from stream_aligner import AlignedSnapshot, StreamAligner
 from sync_metrics import SyncMetricsEngine
-from Synchronisation.tmiv_saver import write_tmiv_metadata
+from tmiv_saver import write_tmiv_metadata
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PALETTE
