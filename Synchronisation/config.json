@@ -35,7 +35,7 @@
             "url": "10.180.145.13:5962",
             "flip": false,
             "display_delay_ms": 0,
-            "enabled": true
+            "enabled": false
         },
         {
             "id": "ottica_4k_2",
@@ -46,7 +46,7 @@
             "url": "10.180.145.58:5962",
             "flip": false,
             "display_delay_ms": 0,
-            "enabled": true
+            "enabled": false
         },
         {
             "id": "insta360_pro2_1",
