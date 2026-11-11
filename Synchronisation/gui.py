@@ -49,7 +49,9 @@ from PyQt5.QtWidgets import (
 import pyqtgraph as pg
 pg.setConfigOptions(exitCleanup=True)
 
+import config
 from settings_window import SettingsDialog
+from calibration.calibration_window import CalibrationWindow
 from gst_camera_stream import TimestampedFrame
 from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
@@ -691,6 +693,23 @@ class MainWindow(QMainWindow):
         """)
         self._btn_flash_reset.clicked.connect(self._on_flash_calib_reset)
         tb.addWidget(self._btn_flash_reset)
+
+        self._btn_calibration = QPushButton("▦  Calibration")
+        self._btn_calibration.setFixedSize(120, 28)
+        self._btn_calibration.setToolTip(
+            "Geometric calibration (checkerboard): estimates intrinsics,\n"
+            "relative position and rotation of each camera.")
+        self._btn_calibration.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #1f6feb; color: white;
+                border: none; border-radius: 4px;
+                font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover   {{ background-color: {_BLUE}; }}
+            QPushButton:pressed {{ background-color: #1158c7; }}
+        """)
+        self._btn_calibration.clicked.connect(self._on_calibration)
+        tb.addWidget(self._btn_calibration)
 
         self._btn_record = QPushButton("\u23fa  Record")
         self._btn_record.setFixedSize(120, 28)
@@ -1743,6 +1762,39 @@ class MainWindow(QMainWindow):
         if sd.exec_():
             self.runtime.restart()
 
+    # ── Geometric calibration ────────────────────────────────────────────────
+
+    def _on_calibration(self):
+        win = getattr(self, "_calib_window", None)
+        if win is not None:
+            try:
+                win.showNormal()
+                win.raise_()
+                win.activateWindow()
+                return
+            except RuntimeError:        # already deleted by Qt
+                pass
+        configs = getattr(self.runtime, "configs", {}) or {}
+        model_of = {c["id"]: c.get("model") for c in configs.get("cameras", [])}
+        projections = {
+            cam.camera_id: config.get_model_attribute(
+                configs, model_of.get(cam.camera_id), "projection")
+            for cam in self.runtime.streams
+        } if configs else {}
+        win = CalibrationWindow(self.runtime.streams, projections, self)
+        win.destroyed.connect(lambda *_: setattr(self, "_calib_window", None))
+        self._calib_window = win
+        win.show()
+
+    def _close_calibration_window(self):
+        win = getattr(self, "_calib_window", None)
+        self._calib_window = None
+        if win is not None:
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+
     def rebuild_graph_state(self):
 
         _PLOT_COLORS = [
@@ -1825,6 +1877,9 @@ class MainWindow(QMainWindow):
     
     def rebuild_grid(self):
 
+        # the streams are replaced: the calibration window would keep the old ones
+        self._close_calibration_window()
+
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
@@ -1846,6 +1901,8 @@ class MainWindow(QMainWindow):
     # ── Fermeture propre ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+
+        self._close_calibration_window()
 
         try:
             self._plot_widget.close()
