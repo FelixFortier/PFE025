@@ -387,9 +387,7 @@ class RecordingWorker(threading.Thread):
 
     def _init_cam_writer(self, cam, tf,
                          yuv_files: dict, frame_sizes: dict,
-                         yuv_files: dict, frame_sizes: dict,
                          csv_files: dict, frame_idx: dict) -> None:
-        """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
         """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
 
         Extrait du run() pour permettre l'initialisation tardive d'une caméra
@@ -458,7 +456,6 @@ class RecordingWorker(threading.Thread):
                             continue
                         self._init_cam_writer(
                             cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
-                            cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         )
 
                 # ── Initialisation tardive des caméras manquantes ───────
@@ -466,13 +463,11 @@ class RecordingWorker(threading.Thread):
                 # snapshot, elle est ajoutée dès qu'une frame est disponible).
                 for cam in self._cameras:
                     if cam.camera_id in yuv_files:
-                    if cam.camera_id in yuv_files:
                         continue
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or tf.frame is None:
                         continue
                     self._init_cam_writer(
-                        cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                     )
                     print(
@@ -493,7 +488,6 @@ class RecordingWorker(threading.Thread):
                 # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
                 def _encode_cam(cam):
                     tf = snapshot.frames.get(cam.camera_id)
-                    if tf is None or cam.camera_id not in yuv_files:
                     if tf is None or cam.camera_id not in yuv_files:
                         return
                     yuv_file = yuv_files[cam.camera_id]
@@ -533,11 +527,6 @@ class RecordingWorker(threading.Thread):
                           f"{write_ms:.0f} ms", flush=True)
 
         finally:
-            # ── Fermeture des fichiers YUV bruts ────────────────────────
-            for cam_id, yuv_f in yuv_files.items():
-                try:
-                    yuv_f.flush()
-                    yuv_f.close()
             # ── Fermeture des fichiers YUV bruts ────────────────────────
             for cam_id, yuv_f in yuv_files.items():
                 try:
@@ -1649,14 +1638,12 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(
                 f"Cam_Synchro \u2014 \u23fa REC")
             print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
-            print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
                   flush=True)
             rec_paths: dict[str, str] = {}
             csv_paths: dict[str, str] = {}
             for cam in self.runtime.streams:
                 safe_name = cam.name.replace(" ", "_").replace("/", "_").replace("#", "N")
                 rec_paths[cam.camera_id] = os.path.join(
-                    self._record_dir, f"{safe_name}.yuv")
                     self._record_dir, f"{safe_name}.yuv")
                 csv_paths[cam.camera_id] = os.path.join(
                     self._record_dir, f"{safe_name}.csv")
