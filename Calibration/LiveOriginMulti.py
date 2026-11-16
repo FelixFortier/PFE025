@@ -22,6 +22,8 @@ def connect(URL):
             }
     response = requests.post(command,**post_dic)
 
+    #print(response.status_code)
+    jprint(response.json())
     if response.status_code == 200:
                         results = response.json()['results']
                         fingerprint = results['Fingerprint']
@@ -57,21 +59,26 @@ post_dic = {}
 post_dic['headers'] = {}
 post_dic['headers']['content-type'] = 'application/json'
 
-rtmp_server='rtsp://10.180.137.158/live/live'
-state_api = "http://10.180.137.158:20000/osc/state"
-liveUrl = "%s/live" % (rtmp_server) 
+with open('cameras.txt', 'r') as f:
+    cameraIPs = [line.rstrip() for line in f]
 
-URL1 = "http://10.180.137.156"
-URL2 = "http://10.180.137.158"
-URL3 = "http://10.180.137.160"
+print(cameraIPs)
 
-url_rtmp1 = "rtmp://10.180.137.156/live/live"
-url_rtmp2 = "rtmp://10.180.137.158/live/live"
-url_rtmp3 = "rtmp://10.180.137.160/live/live"
+URL1 = "http://"+cameraIPs[0]
+URL2 = "http://"+cameraIPs[1]
+URL3 = "http://"+cameraIPs[2]
 
-url_o1 = "rtmp://10.180.137.156/live"
-url_o2 = "rtmp://10.180.137.158/live"
-url_o3 = "rtmp://10.180.137.160/live"
+url_rtmp1 = "rtmp://"+cameraIPs[0]+"/live/live"
+url_rtmp2 = "rtmp://"+cameraIPs[1]+"/live/live"
+url_rtmp3 = "rtmp://"+cameraIPs[2]+"/live/live"
+
+url_o1 = "rtmp://"+cameraIPs[0]+"/live"
+url_o2 = "rtmp://"+cameraIPs[1]+"/live"
+url_o3 = "rtmp://"+cameraIPs[2]+"/live"
+
+#print(URL1)
+#print(url_rtmp1)
+#print(url_o1)
 
 
 #Creation of stream array 
@@ -88,8 +95,9 @@ ret = [None] * len(names)     #Bool
 #===========================================================================================
 
 for i in range(len(names)):
-    r[i],f[i]=connect(nameIP[i])
+    
     print('connection de :', nameIP[i])
+    r[i],f[i]=connect(nameIP[i])
     jprint(r[i].json())
 
     print('===========================================================================================')
@@ -124,7 +132,7 @@ for i in range(len(names)):
                          "height": 1080,
                          "framerate": 30, 
                          "bitrate": 6000,
-                         "_liveUrl": "rtmp://10.180.137.160/live/live"
+                         "_liveUrl": "rtmp://10.180.145.20/live/live"
                      },'''
                     "audio": {
                     "mime":'aac', 
@@ -142,9 +150,7 @@ for i in range(len(names)):
                 "stabilization": False,
                 "mode": "origin live"
             }
-    jprint(execute(post_dic[i], nameIP[i]).json()) 
-
-
+    #jprint(execute(post_dic[i], nameIP[i]).json()) 
 
 
 time.sleep(10)
@@ -155,7 +161,7 @@ print('=========================================================================
 for i in range(len(names)):
     r[i],f[i]=connect(nameIP[i])
     print('connection de :', nameIP[i])
-    jprint(r[i].json())
+    #jprint(r[i].json())
 
 
 
@@ -164,4 +170,4 @@ for i in range(len(names)):
     post_dic[i]['headers']['content-type'] = 'application/json'
     post_dic[i]['headers']['Fingerprint'] = f[i]
     res = state(f[i], nameIP[i])
-    jprint(res.json())
+    #jprint(res.json())

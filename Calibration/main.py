@@ -1,3 +1,8 @@
+from pathlib import Path
+# Get the directory of the current file
+current_dir = Path(__file__).parent.resolve()
+print(f"Working Directory: {current_dir}")
+
 # Launch origin live streams for 3 cameras
 exec(open('LiveOriginMulti.py').read())
 

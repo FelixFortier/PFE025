@@ -3,31 +3,31 @@ import cv2
 import matlab.engine
 import os 
 
-'''
-------------------------
-Cam #1 is 10.180.137.156
-Cam #2 is 10.180.137.158
-Cam #3 is 10.180.137.160
-------------------------
-'''
+from pathlib import Path
+current_dir = Path(__file__).parent.resolve()
+print(f"Working Directory: {current_dir}")
 
 # Define paths
-path1 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam1/location/"
-path2 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam2/location/"
-path3 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam3/location/"
+path1 = current_dir / "/Pictures/cam1/location/"
+path2 = current_dir / "/Pictures/cam2/location/"
+path3 = current_dir / "/Pictures/cam3/location/"
 
 # Define array of paths
 taken = [path1, path2, path3]
+print(taken)
 
 # Define pattern parameters
 squareSizeInMM = 148.0
 
-# Define url names
-url156 = ['rtmp://10.180.137.156/live/origin1','rtmp://10.180.137.156/live/origin2','rtmp://10.180.137.156/live/origin3','rtmp://10.180.137.156/live/origin4','rtmp://10.180.137.156/live/origin5','rtmp://10.180.137.156/live/origin6']
-url158 = ['rtmp://10.180.137.158/live/origin1','rtmp://10.180.137.158/live/origin2','rtmp://10.180.137.158/live/origin3','rtmp://10.180.137.158/live/origin4','rtmp://10.180.137.158/live/origin5','rtmp://10.180.137.158/live/origin6']
-url160 = ['rtmp://10.180.137.160/live/origin1','rtmp://10.180.137.160/live/origin2','rtmp://10.180.137.160/live/origin3','rtmp://10.180.137.160/live/origin4','rtmp://10.180.137.160/live/origin5','rtmp://10.180.137.160/live/origin6']
+with open('cameras.txt', 'r') as f:
+    cameraIPs = [line.rstrip() for line in f]
 
-urlAll = url156+url158+url160
+# Define url names
+url1 = ['rtmp://'+cameraIPs[0]+'/live/origin1','rtmp://'+cameraIPs[0]+'/live/origin2','rtmp://'+cameraIPs[0]+'/live/origin3','rtmp://'+cameraIPs[0]+'/live/origin4','rtmp://'+cameraIPs[0]+'/live/origin5','rtmp://'+cameraIPs[0]+'/live/origin6']
+url2 = ['rtmp://'+cameraIPs[1]+'/live/origin1','rtmp://'+cameraIPs[1]+'/live/origin2','rtmp://'+cameraIPs[1]+'/live/origin3','rtmp://'+cameraIPs[1]+'/live/origin4','rtmp://'+cameraIPs[1]+'/live/origin5','rtmp://'+cameraIPs[1]+'/live/origin6']
+url3 = ['rtmp://'+cameraIPs[2]+'/live/origin1','rtmp://'+cameraIPs[2]+'/live/origin2','rtmp://'+cameraIPs[2]+'/live/origin3','rtmp://'+cameraIPs[2]+'/live/origin4','rtmp://'+cameraIPs[2]+'/live/origin5','rtmp://'+cameraIPs[2]+'/live/origin6']
+
+urlAll = url1+url2+url3
 
 # Remove images
 for i in range(len(taken)):

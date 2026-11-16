@@ -1,1 +1,0 @@
-# STIMUL-Projects-STIMUL-Synchronisation

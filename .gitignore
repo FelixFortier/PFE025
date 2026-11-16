@@ -7,3 +7,4 @@ reference_project/
 *.csv
 *.log
 .vscode/
+.python-version

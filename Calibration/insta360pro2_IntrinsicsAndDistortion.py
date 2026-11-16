@@ -1,33 +1,34 @@
 from calib_functions import *
-import cv2 
+import cv2
 
-'''
-------------------------
-Cam #1 is 10.180.137.156
-Cam #2 is 10.180.137.158
-Cam #3 is 10.180.137.160
-------------------------
-'''
-
-# ATTENTION : BIEN ADAPTER LES CHEMINS POUR VOTRE UTILISATION PERSONNELLE !!!
+from pathlib import Path
+current_dir = Path(__file__).parent.resolve()
+#print(f"Working Directory: {current_dir}")
 
 # Define paths
-path1 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam1/calib/"
-path2 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam2/calib/"
-path3 = "C:/Users/AT10820/Desktop/Insta360Pro2Calibration/Pictures/cam3/calib/"
+path1 = current_dir / "Pictures" / "cam1" / "calib"
+path2 = current_dir / "Pictures" / "cam2" / "calib"
+path3 = current_dir / "Pictures" / "cam3" / "calib"
 
 # Define arrays of paths
 calib = [path1, path2, path3]
+#print(calib)
 
 # Define pattern parameters
 nc,nr = 7,11
 
-# Define url names
-url156 = ['rtmp://10.180.137.156/live/origin1','rtmp://10.180.137.156/live/origin2','rtmp://10.180.137.156/live/origin3','rtmp://10.180.137.156/live/origin4','rtmp://10.180.137.156/live/origin5','rtmp://10.180.137.156/live/origin6']
-url158 = ['rtmp://10.180.137.158/live/origin1','rtmp://10.180.137.158/live/origin2','rtmp://10.180.137.158/live/origin3','rtmp://10.180.137.158/live/origin4','rtmp://10.180.137.158/live/origin5','rtmp://10.180.137.158/live/origin6']
-url160 = ['rtmp://10.180.137.160/live/origin1','rtmp://10.180.137.160/live/origin2','rtmp://10.180.137.160/live/origin3','rtmp://10.180.137.160/live/origin4','rtmp://10.180.137.160/live/origin5','rtmp://10.180.137.160/live/origin6']
+with open('cameras.txt', 'r') as f:
+    cameraIPs = [line.rstrip() for line in f]
 
-urlAll = url156+url158+url160
+# Define url names
+url1 = ['rtmp://'+cameraIPs[0]+'/live/origin1','rtmp://'+cameraIPs[0]+'/live/origin2','rtmp://'+cameraIPs[0]+'/live/origin3','rtmp://'+cameraIPs[0]+'/live/origin4','rtmp://'+cameraIPs[0]+'/live/origin5','rtmp://'+cameraIPs[0]+'/live/origin6']
+url2 = ['rtmp://'+cameraIPs[1]+'/live/origin1','rtmp://'+cameraIPs[1]+'/live/origin2','rtmp://'+cameraIPs[1]+'/live/origin3','rtmp://'+cameraIPs[1]+'/live/origin4','rtmp://'+cameraIPs[1]+'/live/origin5','rtmp://'+cameraIPs[1]+'/live/origin6']
+url3 = ['rtmp://'+cameraIPs[2]+'/live/origin1','rtmp://'+cameraIPs[2]+'/live/origin2','rtmp://'+cameraIPs[2]+'/live/origin3','rtmp://'+cameraIPs[2]+'/live/origin4','rtmp://'+cameraIPs[2]+'/live/origin5','rtmp://'+cameraIPs[2]+'/live/origin6']
+
+urlAll = url1+url2+url3
+
+print(url1)
+
 
 '''
 --------------------------
@@ -43,12 +44,19 @@ cam = 0
 while idx<len(urlAll):
     # Print camera name
     print('Cam#{}'.format(cam+1))
+    print('Press C to capture image or N to go to Next view')
 
     # Define url array for current camera
     url = urlAll[idx:idx+6]
 
     # Capture video of each view
     vcap = [cv2.VideoCapture(i) for i in url]
+
+    #print(vcap)
+
+    for j, cap in enumerate(vcap):
+        print(f"View {j+1}: {cap.isOpened()}")
+
     iframe=1
 
     # For each view : display it, Capture images (C) or go to Next view (N)

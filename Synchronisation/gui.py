@@ -23,8 +23,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
+from collections import deque
+import pyqtgraph as pg
 
-import av
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
@@ -42,14 +43,19 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QApplication,
 )
 import pyqtgraph as pg
+pg.setConfigOptions(exitCleanup=True)
 
+from settings_window import SettingsDialog
 from gst_camera_stream import TimestampedFrame
 from flash_calibrator import FlashCalibrator
 from ntp_clock import NTPClock
 from stream_aligner import AlignedSnapshot, StreamAligner
 from sync_metrics import SyncMetricsEngine
+from tmiv_saver import write_tmiv_metadata
+from tmiv_saver import write_tmiv_metadata
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PALETTE
@@ -380,29 +386,28 @@ class RecordingWorker(threading.Thread):
         self.dropped = 0   # snapshots droppés (queue pleine)
 
     def _init_cam_writer(self, cam, tf,
-                         containers: dict, streams: dict,
+                         yuv_files: dict, frame_sizes: dict,
                          csv_files: dict, frame_idx: dict) -> None:
-        """Initialise le container MKV + stream MJPEG + CSV pour une caméra.
+        """Initialise le fichier YUV420p brut (I420) + CSV pour une caméra.
 
         Extrait du run() pour permettre l'initialisation tardive d'une caméra
         qui n'avait pas encore de frame au premier snapshot.
+        Les dimensions doivent être paires (requis par YUV420 / TMIV).
+        Les dimensions doivent être paires (requis par YUV420 / TMIV).
         """
         path = self._rec_paths.get(cam.camera_id)
         if not path:
             return
         h, w = tf.frame.shape[:2]
 
-        # Matroska (.mkv) : streaming-friendly, VFR natif.
-        container = av.open(str(path), mode='w', format='matroska')
-        stream = container.add_stream('mjpeg', rate=30)
-        stream.width   = w
-        stream.height  = h
-        stream.pix_fmt = 'yuvj420p'
-        stream.time_base = Fraction(1, 1000)
-        stream.codec_context.time_base = Fraction(1, 1000)
-        containers[cam.camera_id] = container
-        streams[cam.camera_id]    = stream
-        frame_idx[cam.camera_id]  = 0
+        # Fichier binaire brut : chaque frame = Y(w×h) + U(w/2×h/2) + V(w/2×h/2)
+        yuv_files[cam.camera_id]   = open(str(path), 'wb')
+        frame_sizes[cam.camera_id] = (w, h)
+        frame_idx[cam.camera_id]   = 0
+        # Fichier binaire brut : chaque frame = Y(w×h) + U(w/2×h/2) + V(w/2×h/2)
+        yuv_files[cam.camera_id]   = open(str(path), 'wb')
+        frame_sizes[cam.camera_id] = (w, h)
+        frame_idx[cam.camera_id]   = 0
 
         csv_path = self._csv_paths.get(cam.camera_id)
         if csv_path:
@@ -411,10 +416,14 @@ class RecordingWorker(threading.Thread):
             csv_files[cam.camera_id] = f
 
     def run(self):
-        containers: dict = {}   # camera_id → av.OutputContainer
-        streams:    dict = {}   # camera_id → av.VideoStream
-        csv_files:  dict = {}   # camera_id → file handle
-        frame_idx:  dict = {}   # camera_id → int
+        yuv_files:   dict = {}   # camera_id → file handle (binaire brut I420)
+        frame_sizes: dict = {}   # camera_id → (width, height)
+        csv_files:   dict = {}   # camera_id → file handle
+        frame_idx:   dict = {}   # camera_id → int
+        yuv_files:   dict = {}   # camera_id → file handle (binaire brut I420)
+        frame_sizes: dict = {}   # camera_id → (width, height)
+        csv_files:   dict = {}   # camera_id → file handle
+        frame_idx:   dict = {}   # camera_id → int
         start_ntp: float | None = None
 
         # Pool d'encodage persistant : évite l'overhead de spawn/teardown
@@ -446,24 +455,20 @@ class RecordingWorker(threading.Thread):
                             )
                             continue
                         self._init_cam_writer(
-                            cam, tf, containers, streams, csv_files, frame_idx
+                            cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                         )
-
-                # ── PTS en ms relatifs au début de l'enregistrement ────
-                pts_ms = int((snapshot.reference_ntp - start_ntp) * 1000.0)
-                pts_ms = max(pts_ms, 0)
 
                 # ── Initialisation tardive des caméras manquantes ───────
                 # (au cas où la caméra n'avait pas encore de frame au premier
                 # snapshot, elle est ajoutée dès qu'une frame est disponible).
                 for cam in self._cameras:
-                    if cam.camera_id in containers:
+                    if cam.camera_id in yuv_files:
                         continue
                     tf = snapshot.frames.get(cam.camera_id)
                     if tf is None or tf.frame is None:
                         continue
                     self._init_cam_writer(
-                        cam, tf, containers, streams, csv_files, frame_idx
+                        cam, tf, yuv_files, frame_sizes, csv_files, frame_idx
                     )
                     print(
                         f"[RecordingWorker] Caméra {cam.name} initialisée "
@@ -473,40 +478,39 @@ class RecordingWorker(threading.Thread):
 
                 t_write_start = time.monotonic()
 
-                # ── Encodage des 4 caméras en parallèle ───────────────
-                # cv2.imencode libère le GIL → exécution C réellement parallèle
-                # sur plusieurs cœurs. Les 4 threads s'exécutent simultanément,
-                # latence totale ≈ max(cam1..4) ≈ 5-20 ms au lieu de 100+ ms.
+                # ── Conversion YUV420p (I420) et écriture brute ───────
+                # cv2.cvtColor libère le GIL → conversion C réellement parallèle.
+                # Chaque frame BGR→I420 : ~2-5 ms/cam, écriture I/O directe.
+                # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
+                # ── Conversion YUV420p (I420) et écriture brute ───────
+                # cv2.cvtColor libère le GIL → conversion C réellement parallèle.
+                # Chaque frame BGR→I420 : ~2-5 ms/cam, écriture I/O directe.
+                # Format : Y plane (w×h) + U plane (w/2×h/2) + V plane (w/2×h/2).
                 def _encode_cam(cam):
                     tf = snapshot.frames.get(cam.camera_id)
-                    if tf is None or cam.camera_id not in containers:
+                    if tf is None or cam.camera_id not in yuv_files:
                         return
-                    stream    = streams[cam.camera_id]
-                    container = containers[cam.camera_id]
+                    yuv_file = yuv_files[cam.camera_id]
+                    yuv_file = yuv_files[cam.camera_id]
 
-                    # Encodage JPEG via OpenCV (bypass pipeline PyAV MJPEG)
-                    ok, jpeg_buf = cv2.imencode(
-                        '.jpg', tf.frame,
-                        [cv2.IMWRITE_JPEG_QUALITY, 85]
-                    )
-                    if not ok:
-                        return
+                    # Conversion BGR → YUV420p planar I420 (non compressé)
+                    # Les dimensions doivent être paires (requis par YUV420).
+                    yuv = cv2.cvtColor(tf.frame, cv2.COLOR_BGR2YUV_I420)
+                    yuv_file.write(yuv.tobytes())
 
-                    # Injection directe des bytes JPEG comme packet MKV
-                    packet           = av.Packet(jpeg_buf)
-                    packet.pts       = pts_ms
-                    packet.dts       = pts_ms
-                    packet.time_base = Fraction(1, 1000)
-                    packet.stream    = stream
-                    try:
-                        container.mux(packet)
-                    except Exception as _mux_err:
-                        print(f"[RecordingWorker] Erreur mux {cam.camera_id}: "
-                              f"{_mux_err}", flush=True)
+                    idx        = frame_idx[cam.camera_id]
+                    h_frame    = tf.frame.shape[0]
+                    mean_luma  = float(yuv[:h_frame].mean())  # plan Y uniquement
+                    csv_f      = csv_files.get(cam.camera_id)
+                    # Conversion BGR → YUV420p planar I420 (non compressé)
+                    # Les dimensions doivent être paires (requis par YUV420).
+                    yuv = cv2.cvtColor(tf.frame, cv2.COLOR_BGR2YUV_I420)
+                    yuv_file.write(yuv.tobytes())
 
-                    idx       = frame_idx[cam.camera_id]
-                    mean_luma = float(tf.frame[..., 1].mean())
-                    csv_f     = csv_files.get(cam.camera_id)
+                    idx        = frame_idx[cam.camera_id]
+                    h_frame    = tf.frame.shape[0]
+                    mean_luma  = float(yuv[:h_frame].mean())  # plan Y uniquement
+                    csv_f      = csv_files.get(cam.camera_id)
                     if csv_f:
                         csv_f.write(f"{idx},{tf.ntp_timestamp:.6f},{mean_luma:.2f}\n")
                     frame_idx[cam.camera_id] = idx + 1
@@ -523,21 +527,38 @@ class RecordingWorker(threading.Thread):
                           f"{write_ms:.0f} ms", flush=True)
 
         finally:
-            # ── Flush encodeurs + fermeture propre des containers ───────
-            for cam_id, container in containers.items():
-                stream = streams.get(cam_id)
-                if stream:
-                    try:
-                        # MJPEG raw-mux : pas d'état encodeur à flusher.
-                        # L'appel stream.encode() est un no-op ici.
-                        for packet in stream.encode():
-                            container.mux(packet)
-                    except Exception:
-                        pass  # normal pour un stream MJPEG raw-mux
+            # ── Fermeture des fichiers YUV bruts ────────────────────────
+            for cam_id, yuv_f in yuv_files.items():
                 try:
-                    container.close()
+                    yuv_f.flush()
+                    yuv_f.close()
                 except Exception as e:
-                    print(f"[RecordingWorker] Close {cam_id}: {e}", flush=True)
+                    print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
+
+            # ── Écriture des métadonnées TMIV ───────────────────────────
+            if self._rec_paths and frame_sizes:
+                _first = next(iter(self._rec_paths.values()), None)
+                if _first:
+                    write_tmiv_metadata(
+                        out_dir     = os.path.dirname(_first),
+                        cameras     = self._cameras,
+                        rec_paths   = self._rec_paths,
+                        frame_sizes = frame_sizes,
+                        n_frames    = max(frame_idx.values()) if frame_idx else self.written,
+                    )
+                    print(f"[RecordingWorker] Close YUV {cam_id}: {e}", flush=True)
+
+            # ── Écriture des métadonnées TMIV ───────────────────────────
+            if self._rec_paths and frame_sizes:
+                _first = next(iter(self._rec_paths.values()), None)
+                if _first:
+                    write_tmiv_metadata(
+                        out_dir     = os.path.dirname(_first),
+                        cameras     = self._cameras,
+                        rec_paths   = self._rec_paths,
+                        frame_sizes = frame_sizes,
+                        n_frames    = max(frame_idx.values()) if frame_idx else self.written,
+                    )
 
             for f in csv_files.values():
                 try:
@@ -569,16 +590,9 @@ class RecordingWorker(threading.Thread):
 class MainWindow(QMainWindow):
     """Fenêtre principale de l'application."""
 
-    def __init__(self, cameras: list, ntp_clock: NTPClock,
-                 metrics_engine: SyncMetricsEngine, aligner: StreamAligner,
-                 dyn_aligner=None,
-                 ):
+    def __init__(self, runtime):
         super().__init__()
-        self._cameras        = cameras
-        self._clock          = ntp_clock
-        self._metrics_engine = metrics_engine
-        self._aligner        = aligner
-        self._dyn_aligner    = dyn_aligner
+        self.runtime = runtime
 
         self.setWindowTitle("Cam_Synchro")
         self.setMinimumSize(1280, 760)
@@ -593,14 +607,14 @@ class MainWindow(QMainWindow):
         self._rec_worker: RecordingWorker | None = None
         self._last_snap_ntp: float = 0.0  # déduplication côté producteur
 
-        self._flash_calib = FlashCalibrator(cameras)
+        self._flash_calib = FlashCalibrator(self.runtime.streams)
         # Historique des calibrations idéales absolues (fenêtre glissante de 5).
         # Chaque entrée = {cam_id: ideal_calib_ms} — valeur absolue indépendante
         # de la calibration courante. Jamais remis à zéro entre les applications :
         # la médiane sur N mesures absorbe la variabilité pipeline ±75ms des Insta.
         self._flash_history: list[dict] = []
         self._flash_reject_streak: int = 0
-        self._cam_name_by_id = {c.camera_id: c.name for c in cameras}
+        self._cam_name_by_id = {c.camera_id: c.name for c in self.runtime.streams}
 
         self._build_ui()
         self._start_timers()
@@ -627,6 +641,20 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet(logo.styleSheet() + " letter-spacing:2px;")
         tb.addWidget(logo)
         tb.addStretch()
+
+        self._btn_manage_streams = QPushButton("\u2699 Manage Streams")
+        self._btn_manage_streams.setFixedSize(140, 28)
+        self._btn_manage_streams.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #238636; color: white;
+                border: none; border-radius: 4px;
+                font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover   {{ background-color: {_BLUE}; }}
+            QPushButton:pressed {{ background-color: #196127; }}
+        """)
+        self._btn_manage_streams.clicked.connect(self._on_manage_streams)
+        tb.addWidget(self._btn_manage_streams)
 
         self._btn_align = QPushButton("\u27f3  Align streams")
         self._btn_align.setFixedSize(140, 28)
@@ -746,34 +774,36 @@ class MainWindow(QMainWindow):
             f"QSplitter::handle {{ background-color: {_BORDER}; height: 3px; }}")
 
         # ── Grille vidéo ─────────────────────────────────────────────────
-        video_container = QWidget()
-        n      = len(self._cameras)
+        self.video_container = QWidget()
+        n      = len(self.runtime.streams)
         nb_col = math.ceil(math.sqrt(n))
 
-        grid = QGridLayout(video_container)
-        grid.setContentsMargins(10, 4, 10, 4)
-        grid.setSpacing(8)
+        self.grid = QGridLayout(self.video_container)
+        self.grid.setContentsMargins(10, 4, 10, 4)
+        self.grid.setSpacing(8)
 
         self._cam_widgets: dict[str, CameraWidget] = {}
-        for idx, cam in enumerate(self._cameras):
+        for idx, cam in enumerate(self.runtime.streams):
             cw = CameraWidget(idx, cam)
-            grid.addWidget(cw, idx // nb_col, idx % nb_col)
+            self.grid.addWidget(cw, idx // nb_col, idx % nb_col)
             self._cam_widgets[cam.camera_id] = cw
 
-        splitter.addWidget(video_container)
+        splitter.addWidget(self.video_container)
 
         # ── Graphiques : deux vues empilées ─────────────────────────────
         # 1) « Désync visuelle » : ce que l'œil voit à l'écran, calibration
         #    comprise (temps_visuel = ntp + display_delay + calib_delay).
         # 2) « Résidu temporel » : écart du timestamp affiché de chaque flux
         #    vs le temps de référence calculé par l'aligneur (ancien graphe).
+        
         pg.setConfigOptions(antialias=True)
 
+        
         _PLOT_COLORS = ["#58a6ff", "#3fb950", "#f85149",
                         "#bc8cff", "#ff7b72", "#79c0ff", "#56d364"]
 
         def _build_plot(title: str, ylabel: str):
-            """Construit un PlotWidget configuré + ses courbes par caméra."""
+            #Construit un PlotWidget configuré + ses courbes par caméra.
             w = pg.PlotWidget(title=title)
             w.setBackground(_BG2)
             w.showGrid(x=True, y=True, alpha=0.3)
@@ -815,15 +845,15 @@ class MainWindow(QMainWindow):
 
             curves: dict[str, pg.PlotDataItem] = {}
             history: dict[str, collections.deque] = {}
-            for i, cam in enumerate(self._cameras[1:]):
+            for i, cam in enumerate(self.runtime.streams[1:]):
                 color = _PLOT_COLORS[i % len(_PLOT_COLORS)]
                 curves[cam.camera_id] = w.plot(
                     pen=pg.mkPen(color, width=2),
-                    name=f"{cam.name} − {self._cameras[0].name}")
+                    name=f"{cam.name} − {self.runtime.streams[0].name}")
                 history[cam.camera_id] = collections.deque(maxlen=300)
             return w, curves, history
 
-        ref_name = self._cameras[0].name
+        ref_name = self.runtime.streams[0].name
         # Graphe 1 : désync visuelle (effet réel perçu, calibration comprise)
         self._plot_widget, self._plot_curves, self._plot_history = _build_plot(
             f"Visual desync vs {ref_name}",
@@ -846,7 +876,7 @@ class MainWindow(QMainWindow):
 
         # Marker vertical au moment où l'alignement est (dés)activé
         self._align_markers: list = []
-        self._last_align_state: bool = self._aligner.is_enabled
+        self._last_align_state: bool = self.runtime.aligner.is_enabled
 
         # Les deux graphes empilés verticalement dans un sous-splitter
         plots_splitter = QSplitter(Qt.Vertical)
@@ -860,7 +890,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)  # graphes = 1/4
 
         root.addWidget(splitter, stretch=1)
-
+        
     # ── Timers ────────────────────────────────────────────────────────────────
 
     def _start_timers(self):
@@ -997,15 +1027,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _refresh_video(self):
-        if self._aligner.is_enabled:
-            snapshot = self._aligner.get_aligned_frames()
-            for cam in self._cameras:
+        if self.runtime.aligner.is_enabled:
+            snapshot = self.runtime.aligner.get_aligned_frames()
+            for cam in self.runtime.streams:
                 tf = snapshot.frames.get(cam.camera_id)
                 self._cam_widgets[cam.camera_id].refresh(
                     tf,
                     residual_ms=snapshot.residuals_ms.get(cam.camera_id))
         else:
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 tf = cam.latest_frame()
                 self._cam_widgets[cam.camera_id].refresh(tf)
 
@@ -1017,7 +1047,7 @@ class MainWindow(QMainWindow):
         snapshots à la queue du worker.
 
         Toutes les opérations effectuées ici sont thread-safe :
-          - `self._aligner.get_aligned_frames()` : lecture des buffers
+          - `self.runtime.aligner.get_aligned_frames()` : lecture des buffers
             internes des caméras (locks internes).
           - `self._push_snapshot_to_rec()` : push dans une `queue.Queue`
             (thread-safe par construction) + lecture/écriture d'attributs
@@ -1029,7 +1059,7 @@ class MainWindow(QMainWindow):
             t0 = time.monotonic()
             if self._recording:
                 try:
-                    snapshot = self._aligner.get_aligned_frames()
+                    snapshot = self.runtime.aligner.get_aligned_frames()
                     self._push_snapshot_to_rec(snapshot)
                 except Exception as e:
                     print(f"[RecPushThread] Erreur : {e}", flush=True)
@@ -1044,16 +1074,16 @@ class MainWindow(QMainWindow):
         # métriques, les cartes et le graphique.
         snap: AlignedSnapshot | None = None
         aligned_ts = None
-        if self._aligner.is_enabled:
-            snap = self._aligner.get_aligned_frames()
-            offsets = self._aligner.get_offsets()
+        if self.runtime.aligner.is_enabled:
+            snap = self.runtime.aligner.get_aligned_frames()
+            offsets = self.runtime.aligner.get_offsets()
             aligned_ts = {}
             for cid, tf in snap.frames.items():
                 if tf is not None:
                     # Timestamp corrigé = timestamp brut + offset correctif
                     aligned_ts[cid] = tf.ntp_timestamp + offsets.get(cid, 0.0)
 
-        metrics = self._metrics_engine.compute_all_pairs(aligned_ts)
+        metrics = self.runtime.metrics_engine.compute_all_pairs(aligned_ts)
 
         if metrics:
             max_off    = max(abs(m.offset_ms)   for m in metrics)
@@ -1076,7 +1106,7 @@ class MainWindow(QMainWindow):
         self._card_jitter.set_value(avg_jitter,   color=_offset_color(avg_jitter))
         self._card_drift.set_value(drift_per_min, fmt="{:+.2f}")
 
-        self._aligner.check_drift_recalib(metrics)
+        self.runtime.aligner.check_drift_recalib(metrics)
 
         # ── Mise à jour graphique : désynchronisation visuelle réelle ────────
         # On trace le « temps visuel » de chaque frame affichée vs la référence :
@@ -1090,8 +1120,8 @@ class MainWindow(QMainWindow):
         # réelle (≈ 0 si bien synchro), cohérente avec le Visual spread du Flash
         # Calib. Mode OFF : latest_frame() applique déjà calib_delay en interne,
         # donc la même formule reste valable.
-        ref_cam = self._cameras[0]
-        if self._aligner.is_enabled and snap is not None:
+        ref_cam = self.runtime.streams[0]
+        if self.runtime.aligner.is_enabled and snap is not None:
             ref_tf = snap.frames.get(ref_cam.camera_id)
         else:
             snap = None
@@ -1114,13 +1144,13 @@ class MainWindow(QMainWindow):
             #  - Mode OFF : pas de cible → écart des ntp_timestamp bruts des
             #    frames les plus récentes (réalité avant alignement).
             ref_residual = 0.0
-            if self._aligner.is_enabled and snap is not None:
+            if self.runtime.aligner.is_enabled and snap is not None:
                 ref_residual = snap.residuals_ms.get(ref_cam.camera_id, 0.0)
 
-            for cam in self._cameras[1:]:
+            for cam in self.runtime.streams[1:]:
                 cid = cam.camera_id
                 # ── Graphe 1 : désync visuelle (frame réellement affichée) ──
-                if self._aligner.is_enabled and snap is not None:
+                if self.runtime.aligner.is_enabled and snap is not None:
                     cam_tf = snap.frames.get(cid)
                 else:
                     cam_tf = cam.latest_frame()
@@ -1132,10 +1162,12 @@ class MainWindow(QMainWindow):
                     delta_ms = (cam_vis - ref_vis) * 1000.0
                     self._plot_history[cid].append(delta_ms)
                 else:
+                    if cid not in self._plot_history:
+                        self._plot_history[cid] = deque(maxlen=300)
                     self._plot_history[cid].append(float("nan"))
 
                 # ── Graphe 2 : résidu vs temps de référence calculé ─────────
-                if self._aligner.is_enabled and snap is not None:
+                if self.runtime.aligner.is_enabled and snap is not None:
                     cam_residual = snap.residuals_ms.get(cid)
                     if cam_residual is not None:
                         self._plot_history_raw[cid].append(
@@ -1154,15 +1186,15 @@ class MainWindow(QMainWindow):
             self._plot_time_history.append(t_sec)
 
             # Marker vertical si l'état d'alignement a changé
-            if self._aligner.is_enabled != self._last_align_state:
-                color = '#3fb950' if self._aligner.is_enabled else '#f0c040'
+            if self.runtime.aligner.is_enabled != self._last_align_state:
+                color = '#3fb950' if self.runtime.aligner.is_enabled else '#f0c040'
                 for w in (self._plot_widget, self._plot_widget_raw):
                     marker = pg.InfiniteLine(
                         angle=90, pos=t_sec,
                         pen=pg.mkPen(color, width=1, style=Qt.DotLine))
                     w.addItem(marker)
                     self._align_markers.append((t_sec, w, marker))
-                self._last_align_state = self._aligner.is_enabled
+                self._last_align_state = self.runtime.aligner.is_enabled
 
             x = list(self._plot_time_history)
             for cid, curve in self._plot_curves.items():
@@ -1205,7 +1237,7 @@ class MainWindow(QMainWindow):
         if not offs:
             return {}
 
-        cam_by_id = {c.camera_id: c for c in self._cameras}
+        cam_by_id = {c.camera_id: c for c in self.runtime.streams}
         max_off = max(offs.values())
 
         # Calibration idéale absolue pour ce flash :
@@ -1332,7 +1364,7 @@ class MainWindow(QMainWindow):
         """Remet tous les délais de calibration flash à 0 et vide l'historique."""
         self._flash_history.clear()
         self._flash_reject_streak = 0
-        for cam in self._cameras:
+        for cam in self.runtime.streams:
             if hasattr(cam, "set_calibration_delay"):
                 cam.set_calibration_delay(0.0)
         print("[FlashCalib] Calibration RESET — all calib_delay set to 0 ms, "
@@ -1360,7 +1392,7 @@ class MainWindow(QMainWindow):
         # la médiane RTCP converge ; avant cela, les timestamps Insta dérivent.
         _RTCP_MIN_SR = 20
         rtcp_warn = []
-        for _cam in self._cameras:
+        for _cam in self.runtime.streams:
             if hasattr(_cam, 'sr_count') and hasattr(_cam, 'name'):
                 _sc = _cam.sr_count
                 if 0 < _sc < _RTCP_MIN_SR:
@@ -1577,7 +1609,8 @@ class MainWindow(QMainWindow):
             body.append("Not detected: " + ", ".join(result.not_detected))
         msg.setText("<br>".join(body))
         msg.setStandardButtons(QMessageBox.Ok)
-        msg.show()
+        #msg.show()
+        msg.exec()#test
 
         # Trace console pour log/analyse a posteriori
         print("[FlashCalib] Results:", flush=True)
@@ -1604,14 +1637,14 @@ class MainWindow(QMainWindow):
             self._lbl_rec_elapsed.setVisible(True)
             self.setWindowTitle(
                 f"Cam_Synchro \u2014 \u23fa REC")
-            print("[CamSync] Recording format: MKV (MJPEG) via PyAV — VFR",
+            print("[CamSync] Recording format: YUV420p raw I420 — TMIV compatible",
                   flush=True)
             rec_paths: dict[str, str] = {}
             csv_paths: dict[str, str] = {}
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 safe_name = cam.name.replace(" ", "_").replace("/", "_").replace("#", "N")
                 rec_paths[cam.camera_id] = os.path.join(
-                    self._record_dir, f"{safe_name}.mkv")
+                    self._record_dir, f"{safe_name}.yuv")
                 csv_paths[cam.camera_id] = os.path.join(
                     self._record_dir, f"{safe_name}.csv")
 
@@ -1619,7 +1652,7 @@ class MainWindow(QMainWindow):
             self._rec_queue  = queue.Queue(maxsize=8)
             self._rec_worker = RecordingWorker(
                 snapshot_queue=self._rec_queue,
-                cameras=self._cameras,
+                cameras=self.runtime.streams,
                 rec_paths=rec_paths,
                 csv_paths=csv_paths,
             )
@@ -1661,7 +1694,7 @@ class MainWindow(QMainWindow):
                   f"{written} snapshots written, {dropped} dropped", flush=True)
             summary_parts = []
             fps_real = (written / elapsed) if elapsed > 0 else 0.0
-            for cam in self._cameras:
+            for cam in self.runtime.streams:
                 print(f"[CamSync]   {cam.name:<22}  {written:5d} frames  "
                       f"({fps_real:5.1f} fps avg)", flush=True)
                 summary_parts.append(
@@ -1673,7 +1706,7 @@ class MainWindow(QMainWindow):
                 self._lbl_val_icon.setStyleSheet(_style(_GREEN, 16, bold=True))
                 m = int(elapsed // 60); s = int(elapsed % 60)
                 self._lbl_val_title.setText(
-                    f"Recording finished  {m:02d}:{s:02d}  ({len(self._cameras)} cameras)")
+                    f"Recording finished  {m:02d}:{s:02d}  ({len(self.runtime.streams)} cameras)")
                 self._lbl_val_detail.setText("   ".join(summary_parts))
                 self._lbl_val_spread.setText(f"Saved → {self._record_dir}")
                 self._validation_bar.setVisible(True)
@@ -1697,8 +1730,8 @@ class MainWindow(QMainWindow):
             """)
 
     def _on_align_toggle(self):
-        self._aligner.toggle()
-        if self._aligner.is_enabled:
+        self.runtime.aligner.toggle()
+        if self.runtime.aligner.is_enabled:
             self._btn_align.setText("\u2713  Aligned")
             self._btn_align.setStyleSheet(f"""
                 QPushButton {{
@@ -1719,12 +1752,132 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ background-color: {_GREEN}; }}
             """)
 
+    # ── Camera Setup ─────────────────────────────────────────────────────────
+    
+    def _on_manage_streams(self):
+        sd = SettingsDialog(self)
+        if sd.exec_():
+            self.runtime.restart()
+
+    def rebuild_graph_state(self):
+
+        _PLOT_COLORS = [
+            "#58a6ff",
+            "#3fb950",
+            "#f85149",
+            "#bc8cff",
+            "#ff7b72",
+            "#79c0ff",
+            "#56d364",]
+
+        # Clear existing curves
+
+        for curve in self._plot_curves.values():
+            try:
+                self._plot_widget.removeItem(curve)
+            except Exception:
+                pass
+        for curve in self._plot_curves_raw.values():
+            try:
+                self._plot_widget_raw.removeItem(curve)
+            except Exception:
+                pass
+
+        self._plot_curves.clear()
+        self._plot_curves_raw.clear()
+        self._plot_history.clear()
+        self._plot_history_raw.clear()
+
+        # Rebuild camera name map
+        self._cam_name_by_id = {
+            c.camera_id: c.name
+            for c in self.runtime.streams
+        }
+        
+        # Reset histories
+        self._plot_time_history = deque(maxlen=300)
+
+        # Recreate curves
+        if len(self.runtime.streams) <= 1:
+            return
+
+        ref_name = self.runtime.streams[0].name
+
+        for idx, cam in enumerate(self.runtime.streams[1:]):
+
+            color = _PLOT_COLORS[idx % len(_PLOT_COLORS)]
+
+            # Visual desync graph
+            self._plot_curves[cam.camera_id] = self._plot_widget.plot(
+                pen=pg.mkPen(color, width=2),
+                name=f"{cam.name} - {ref_name}",
+            )
+
+            self._plot_history[cam.camera_id] = deque(maxlen=300)
+
+            # Raw residual graph
+            self._plot_curves_raw[cam.camera_id] = self._plot_widget_raw.plot(
+                pen=pg.mkPen(color, width=2),
+                name=f"{cam.name} - {ref_name}",
+            )
+
+            self._plot_history_raw[cam.camera_id] = deque(maxlen=300)
+
+        # Reset markers/history
+        for _, plot_widget, marker in self._align_markers:
+            try:
+                plot_widget.removeItem(marker)
+            except Exception:
+                pass
+
+        self._align_markers.clear()
+        self._plot_t0 = 0.0
+        self._max_off_window.clear()
+        self._last_align_state = self.runtime.aligner.is_enabled
+
+        self._flash_calib = FlashCalibrator(self.runtime.streams
+                                            )
+        print(f"[GUI] Graph state rebuilt for {len(self.runtime.streams)} cameras.",flush=True,)
+    
+    def rebuild_grid(self):
+
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._cam_widgets.clear()
+
+        n      = len(self.runtime.streams)
+        nb_col = math.ceil(math.sqrt(n))
+
+        self._cam_widgets: dict[str, CameraWidget] = {}
+        for idx, cam in enumerate(self.runtime.streams):
+            cw = CameraWidget(idx, cam)
+            self.grid.addWidget(cw, idx // nb_col, idx % nb_col)
+            self._cam_widgets[cam.camera_id] = cw
+        
+        self.rebuild_graph_state()
+        
     # ── Fermeture propre ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+
+        try:
+            self._plot_widget.close()
+            self._plot_widget.deleteLater()
+
+            self._plot_widget_raw.close()
+            self._plot_widget_raw.deleteLater()
+        except Exception as e:
+            print(e)
+
+        from PyQt5.QtWidgets import QApplication
+
         for t in (self._timer_video, self._timer_metrics,
                   self._timer_flash, self._timer_rec):
             t.stop()
+
         # Arrêt propre du thread de push d'enregistrement.
         try:
             self._rec_push_stop.set()
@@ -1740,4 +1893,10 @@ class MainWindow(QMainWindow):
                 self._rec_worker.join(timeout=10.0)
             self._rec_worker = None
             self._rec_queue  = None
+        for widget in QApplication.allWidgets():
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
+        QApplication.quit()
         event.accept()
