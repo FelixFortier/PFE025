@@ -17,6 +17,11 @@ from PyQt5.QtWidgets import (
 )
 import config
 
+# perspective         : caméra classique (sténopé + distorsion)
+# equirect            : panorama 360 équirectangulaire (Insta360 stitché)
+# equirect_stereo_tb  : panorama stéréo, œil gauche en haut / droit en bas (Suometry)
+PROJECTIONS = ["perspective", "equirect", "equirect_stereo_tb"]
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,10 +167,15 @@ class ModelsTab(QWidget):
         self.decoder = QLineEdit()
         self.hw_accel = QLineEdit()
 
+        # Projection géométrique du flux (utilisée par le module de calibration)
+        self.projection = QComboBox()
+        self.projection.addItems(PROJECTIONS)
+
         right.addRow("Name", self.name)
         right.addRow("Bandwidth", self.bandwidth)
         right.addRow("Decoder", self.decoder)
         right.addRow("HW Accel", self.hw_accel)
+        right.addRow("Projection", self.projection)
 
         self.populate()
 
@@ -192,6 +202,8 @@ class ModelsTab(QWidget):
         self.bandwidth.setText(self.current_model["bandwidth"])
         self.decoder.setText(self.current_model["decoder"])
         self.hw_accel.setText(self.current_model["hw_accel"])
+        self.projection.setCurrentText(
+            self.current_model.get("projection", "perspective"))
 
     def add_model(self):
         model = {
@@ -199,6 +211,7 @@ class ModelsTab(QWidget):
             "bandwidth": "",
             "decoder": "",
             "hw_accel": "",
+            "projection": "perspective",
         }
 
         self.configs["models"].append(model)
@@ -228,6 +241,7 @@ class ModelsTab(QWidget):
         model["bandwidth"] = self.bandwidth.text()
         model["decoder"] = self.decoder.text()
         model["hw_accel"] = self.hw_accel.text()
+        model["projection"] = self.projection.currentText()
 
         self.populate()
 

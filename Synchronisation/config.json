@@ -10,19 +10,22 @@
             "name": "Ottica 4K",
             "bandwidth": "highest",
             "decoder": "",
-            "hw_accel": ""
+            "hw_accel": "",
+            "projection": "perspective"
         },
         {
             "name": "Insta 360 Pro2",
             "bandwidth": "",
             "decoder": "pyav",
-            "hw_accel": ""
+            "hw_accel": "",
+            "projection": "equirect"
         },
         {
             "name": "Suometry",
             "bandwidth": "",
             "decoder": "",
-            "hw_accel": ""
+            "hw_accel": "",
+            "projection": "equirect_stereo_tb"
         }
     ],
     "cameras": [
